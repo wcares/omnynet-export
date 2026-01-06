@@ -55,6 +55,19 @@ Based on testing with actual hardware:
 
 ---
 
+## Supported Input Formats
+
+| Format | Support | Priority |
+|--------|---------|----------|
+| **PyTorch (.pt/.pth)** | Full export | P0 (now) |
+| **Existing ONNX (.onnx)** | Enrich with metadata | P0 (now) |
+| TensorFlow | Via tf2onnx | P3 (later) |
+| JAX | Via jax2onnx | P3 (later) |
+
+**Current Focus**: PyTorch + existing ONNX for the 4 Genesis models.
+
+---
+
 ## Target Models
 
 For Genesis AI, we need 4 models:
@@ -221,9 +234,9 @@ omnynet-export/
 
 ### Python API
 ```python
-from omnynet_export import export_model, inspect_omny
+from omnynet_export import export_model, enrich_onnx, inspect_omny
 
-# Export a model
+# Option 1: Export from PyTorch
 result = export_model(
     model="path/to/model.pt",
     # OR model=pytorch_model_instance,
@@ -232,8 +245,14 @@ result = export_model(
     config={
         "min_vram_mb": 1500,
         "max_shard_size_mb": 1200,
-        "allowed_shards": [2, 4, 6],
     }
+)
+
+# Option 2: Enrich existing ONNX
+result = enrich_onnx(
+    onnx_path="model.onnx",
+    output="model.omny",
+    sample_input={"image": np.random.randn(1, 3, 1024, 1024).astype(np.float32)},
 )
 
 print(f"Exported with {len(result.cut_points)} cut points")
