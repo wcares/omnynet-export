@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "omnynet-export"
+version = "0.1.0"
+description = "Export PyTorch models to .omny format for distributed inference on OmnyNet"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "OmnyNet", email = "hello@omnynet.io" }
+]
+keywords = ["onnx", "pytorch", "distributed", "inference", "omnynet"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0.0",
+    "onnx>=1.14.0",
+    "onnxruntime>=1.16.0",
+    "numpy>=1.24.0",
+    "pyyaml>=6.0",
+    "click>=8.0.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+omnynet-export = "omnynet_export.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/wcares/omnynet-export"
+Repository = "https://github.com/wcares/omnynet-export"
+Documentation = "https://github.com/wcares/omnynet-export#readme"
+
+[tool.hatch.build.targets.wheel]
+packages = ["omnynet_export"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = ["E501"]
