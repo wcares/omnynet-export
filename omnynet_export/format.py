@@ -38,11 +38,17 @@ class OmnyInfo:
 def embed_metadata(model: ModelProto, metadata: OmnyMetadata) -> ModelProto:
     """Embed OmnyNet metadata into an ONNX model."""
     # Remove existing omnynet metadata if present
-    model.metadata_props[:] = [
-        prop
+    keys_to_remove = {OMNYNET_VERSION_KEY, OMNYNET_METADATA_KEY}
+    props_to_keep = [
+        (prop.key, prop.value)
         for prop in model.metadata_props
-        if prop.key not in (OMNYNET_VERSION_KEY, OMNYNET_METADATA_KEY)
+        if prop.key not in keys_to_remove
     ]
+    del model.metadata_props[:]
+    for key, value in props_to_keep:
+        prop = model.metadata_props.add()
+        prop.key = key
+        prop.value = value
 
     # Add version
     version_prop = model.metadata_props.add()
