@@ -49,9 +49,13 @@ htmlcov/
 *.bin
 *.safetensors
 
+# Test outputs
+test_outputs/
+
 # Jupyter
 .ipynb_checkpoints/
 
 # OS
 .DS_Store
 Thumbs.db
+IMPLEMENTATION_PLAN.md
