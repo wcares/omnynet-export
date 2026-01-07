@@ -1,6 +1,6 @@
 # omnynet-export
 
-Export PyTorch models to `.omny` format for distributed inference on [OmnyNet](https://omnynet.io).
+Export PyTorch models to `.omny` format for distributed inference.
 
 ## What is .omny?
 
@@ -20,8 +20,9 @@ pip install omnynet-export
 ## Quick Start
 
 ```bash
-# Export a PyTorch model
-omnynet-export export model.pt --sample-input input.npy --output model.omny
+# Simple: auto-detects format, validates, exports
+omnynet-export model.onnx    # → model.omny
+omnynet-export model.pt      # → model.omny
 
 # Inspect an .omny file
 omnynet-export inspect model.omny
@@ -42,14 +43,12 @@ export_model(
 
 ## Supported Models
 
-Currently tested and optimized for:
-
 | Model | Status | Notes |
 |-------|--------|-------|
-| CLIP | Supported | Vision + Text encoder |
-| SAM2 | Supported | Segment Anything 2 |
-| Grounded SAM2 | Supported | Grounded + SAM2 |
-| OCR | Supported | Text recognition |
+| CLIP | Tested | Vision + Text encoder |
+| SAM2 | Planned | Segment Anything 2 |
+| Grounded SAM2 | Planned | Grounded + SAM2 |
+| OCR | Planned | Text recognition |
 
 ## .omny Format
 
