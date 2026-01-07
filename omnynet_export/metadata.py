@@ -143,6 +143,7 @@ class ExportInfo:
     source_framework: str = "pytorch"
     source_version: str = ""
     onnx_opset: int = 17
+    validated: bool = False  # Whether cut points were validated at runtime
 
     def __post_init__(self):
         if not self.exported_at:
@@ -155,6 +156,7 @@ class ExportInfo:
             "source_framework": self.source_framework,
             "source_version": self.source_version,
             "onnx_opset": self.onnx_opset,
+            "validated": self.validated,
         }
 
     @classmethod

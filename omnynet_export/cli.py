@@ -78,34 +78,71 @@ def export(
 @main.command()
 @click.argument("onnx_path", type=click.Path(exists=True))
 @click.option("--output", "-o", required=True, help="Output .omny file path")
+@click.option("--sample-input", "-i", type=click.Path(exists=True), help="Sample input .npy file for validation")
+@click.option("--validate", "-v", is_flag=True, help="Validate cut points by running actual inference")
 @click.option("--min-vram", default=1500, help="Minimum VRAM per node (MB)")
 @click.option("--max-shard-size", default=1200, help="Maximum shard size (MB)")
 @click.option("--name", help="Model name (default: filename)")
 def enrich(
     onnx_path: str,
     output: str,
+    sample_input: Optional[str],
+    validate: bool,
     min_vram: int,
     max_shard_size: int,
     name: Optional[str],
 ):
     """Enrich an existing ONNX model with OmnyNet metadata."""
+    import numpy as np
+
     onnx_path = Path(onnx_path)
     output_path = Path(output)
 
     console.print(f"[bold blue]Enriching:[/] {onnx_path}")
 
+    # Load sample input if provided
+    input_data = None
+    if sample_input:
+        input_data = {"input": np.load(sample_input)}
+    elif validate:
+        # Generate random input based on model's input shape
+        console.print("[yellow]No sample input provided. Generating random input for validation...[/]")
+        import onnx as onnx_lib
+        model = onnx_lib.load(str(onnx_path))
+        input_data = {}
+        for inp in model.graph.input:
+            # Skip initializers
+            if any(init.name == inp.name for init in model.graph.initializer):
+                continue
+            if inp.type.HasField("tensor_type"):
+                tt = inp.type.tensor_type
+                shape = []
+                for dim in tt.shape.dim:
+                    if dim.HasField("dim_value") and dim.dim_value > 0:
+                        shape.append(dim.dim_value)
+                    else:
+                        shape.append(1)  # Default dynamic dim to 1
+                input_data[inp.name] = np.random.randn(*shape).astype(np.float32)
+
     config = ExportConfig(
         min_vram_mb=min_vram,
         max_shard_size_mb=max_shard_size,
         model_name=name,
+        validate=validate,
     )
 
-    result = enrich_onnx(onnx_path, output_path, config=config)
+    result = enrich_onnx(onnx_path, output_path, sample_input=input_data, config=config)
 
     if result.success:
         console.print(f"[bold green]Success![/] Saved to {output_path}")
+        if result.validated:
+            console.print(f"[bold green]Cut points validated![/]")
         console.print()
         _print_export_result(result)
+        if result.validation_errors:
+            console.print("\n[yellow]Validation warnings:[/]")
+            for err in result.validation_errors:
+                console.print(f"  - {err}")
     else:
         console.print(f"[bold red]Failed:[/] {result.error}")
         sys.exit(1)
@@ -275,6 +312,8 @@ def _print_metadata(meta):
     table.add_row("Exporter Version", meta.export_info.exporter_version)
     table.add_row("Source Framework", meta.export_info.source_framework)
     table.add_row("ONNX Opset", str(meta.export_info.onnx_opset))
+    validated_status = "[green]Yes[/]" if meta.export_info.validated else "[yellow]No[/]"
+    table.add_row("Cuts Validated", validated_status)
 
     console.print(table)
 

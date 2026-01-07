@@ -21,6 +21,7 @@ __version__ = "0.1.0"
 from .exporter import export_model, enrich_onnx, ExportResult, ExportConfig
 from .format import inspect_omny, validate_omny, OmnyInfo
 from .metadata import OmnyMetadata, CutPoint, ShardConfig
+from .validator import validate_cut_point, validate_sharding, find_valid_cut_points
 
 __all__ = [
     "export_model",
@@ -33,5 +34,8 @@ __all__ = [
     "OmnyMetadata",
     "CutPoint",
     "ShardConfig",
+    "validate_cut_point",
+    "validate_sharding",
+    "find_valid_cut_points",
     "__version__",
 ]

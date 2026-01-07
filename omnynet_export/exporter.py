@@ -35,6 +35,8 @@ class ExportConfig:
     opset_version: int = 17
     model_name: Optional[str] = None
     model_architecture: str = "unknown"
+    validate: bool = False  # Run actual inference to validate cut points
+    validation_tolerance: float = 1e-4  # Max allowed output difference
 
 
 @dataclass
@@ -47,6 +49,8 @@ class ExportResult:
     cut_points: list
     allowed_shards: list[int]
     error: Optional[str] = None
+    validated: bool = False  # Whether cut points were validated
+    validation_errors: list[str] = None  # Any validation errors
 
     def summary(self) -> str:
         if not self.success:
@@ -355,6 +359,7 @@ def enrich_onnx(
             output_specs,
             source_framework="onnx",
             source_version=f"opset-{opset}",
+            sample_inputs=sample_input,
         )
 
     except Exception as e:
@@ -376,6 +381,7 @@ def _process_onnx_model(
     output_specs: list[TensorSpec],
     source_framework: str,
     source_version: str,
+    sample_inputs: Optional[dict[str, np.ndarray]] = None,
 ) -> ExportResult:
     """Common processing for ONNX models."""
 
@@ -410,6 +416,35 @@ def _process_onnx_model(
         min_shards=cfg.min_shards,
         max_shards=cfg.max_shards,
     )
+
+    # Validate cut points if requested
+    validated = False
+    validation_errors = []
+
+    if cfg.validate and sample_inputs and cut_points:
+        from .validator import find_valid_cut_points
+
+        print("Validating cut points (this may take a moment)...")
+        valid_cuts = find_valid_cut_points(
+            onnx_model,
+            cut_points,
+            sample_inputs,
+            tolerance=cfg.validation_tolerance,
+            verbose=True,
+        )
+
+        # Track which cuts failed
+        valid_ids = {cp.id for cp in valid_cuts}
+        for cp in cut_points:
+            if cp.id not in valid_ids:
+                validation_errors.append(f"Cut point {cp.id} ({cp.after_node}) failed validation")
+
+        # Use only valid cut points
+        cut_points = valid_cuts
+        validated = True
+
+        if not cut_points:
+            print("Warning: No valid cut points found. Model cannot be sharded.")
 
     # Calculate shard configurations
     shard_configs_raw = calculate_shard_configs(cut_points, inference_memory_mb)
@@ -457,6 +492,7 @@ def _process_onnx_model(
             source_framework=source_framework,
             source_version=source_version,
             onnx_opset=opset,
+            validated=validated,
         ),
     )
 
@@ -470,6 +506,8 @@ def _process_onnx_model(
         metadata=metadata,
         cut_points=cut_points,
         allowed_shards=allowed_shards,
+        validated=validated,
+        validation_errors=validation_errors if validation_errors else None,
     )
 
 
