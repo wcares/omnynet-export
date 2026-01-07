@@ -17,11 +17,103 @@ from .format import inspect_omny, validate_omny
 console = Console()
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(version="0.1.0")
-def main():
-    """OmnyNet Export - Convert models to .omny format for distributed inference."""
-    pass
+@click.argument("model_path", type=click.Path(exists=True), required=False)
+@click.option("--output", "-o", help="Output .omny file path (default: same name as input)")
+@click.pass_context
+def main(ctx, model_path: Optional[str], output: Optional[str]):
+    """OmnyNet Export - Convert models to .omny format for distributed inference.
+
+    Simple usage (auto mode):
+        omnynet-export model.onnx          # → model.omny
+        omnynet-export model.pt            # → model.omny
+        omnynet-export model.onnx -o out.omny
+
+    For more control, use subcommands:
+        omnynet-export export ...
+        omnynet-export enrich ...
+        omnynet-export inspect ...
+    """
+    # If a model path is provided without subcommand, run auto mode
+    if model_path and ctx.invoked_subcommand is None:
+        _run_auto_mode(model_path, output)
+    elif ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+def _run_auto_mode(model_path: str, output: Optional[str]):
+    """Auto mode: detect model type, convert, validate, done."""
+    import numpy as np
+
+    model_path = Path(model_path)
+
+    # Auto-generate output path if not provided
+    if output:
+        output_path = Path(output)
+    else:
+        output_path = model_path.with_suffix(".omny")
+
+    # Detect model type
+    suffix = model_path.suffix.lower()
+
+    console.print(f"[bold blue]Auto Mode[/]")
+    console.print(f"  Input:  {model_path}")
+    console.print(f"  Output: {output_path}")
+    console.print()
+
+    config = ExportConfig(
+        model_name=model_path.stem,
+        validate=True,  # Always validate in auto mode
+    )
+
+    if suffix == ".onnx":
+        console.print("[cyan]Detected:[/] ONNX model → enriching with metadata")
+        console.print()
+
+        # Generate sample input from model
+        import onnx
+        model = onnx.load(str(model_path))
+        sample_input = {}
+        for inp in model.graph.input:
+            if any(init.name == inp.name for init in model.graph.initializer):
+                continue
+            if inp.type.HasField("tensor_type"):
+                tt = inp.type.tensor_type
+                shape = []
+                for dim in tt.shape.dim:
+                    if dim.HasField("dim_value") and dim.dim_value > 0:
+                        shape.append(dim.dim_value)
+                    else:
+                        shape.append(1)
+                sample_input[inp.name] = np.random.randn(*shape).astype(np.float32)
+
+        result = enrich_onnx(model_path, output_path, sample_input=sample_input, config=config)
+
+    elif suffix in (".pt", ".pth"):
+        console.print("[cyan]Detected:[/] PyTorch model → exporting to ONNX + metadata")
+        console.print("[yellow]Note:[/] PyTorch export requires model architecture. Using default input shape.")
+        console.print()
+
+        # For PyTorch, we need sample input - use common image shape
+        sample_input = {"input": np.random.randn(1, 3, 224, 224).astype(np.float32)}
+        result = export_model(model_path, output_path, sample_input, config)
+
+    else:
+        console.print(f"[bold red]Error:[/] Unknown file type: {suffix}")
+        console.print("Supported: .onnx, .pt, .pth")
+        sys.exit(1)
+
+    # Print result
+    if result.success:
+        console.print(f"[bold green]Success![/] Saved to {output_path}")
+        if result.validated:
+            console.print(f"[bold green]Cut points validated![/]")
+        console.print()
+        _print_export_result(result)
+    else:
+        console.print(f"[bold red]Failed:[/] {result.error}")
+        sys.exit(1)
 
 
 @main.command()
