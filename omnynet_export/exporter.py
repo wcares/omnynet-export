@@ -234,6 +234,11 @@ def export_model(
                         dtype=_torch_dtype_to_str(tensor.dtype),
                     ))
 
+            # Convert input tensors to numpy for validation
+            sample_inputs_np = {}
+            for name, tensor in input_tensors.items():
+                sample_inputs_np[name] = tensor.cpu().numpy()
+
             # Continue with common processing
             return _process_onnx_model(
                 onnx_model,
@@ -243,6 +248,7 @@ def export_model(
                 output_specs,
                 source_framework="pytorch",
                 source_version=torch.__version__,
+                sample_inputs=sample_inputs_np,
             )
 
         finally:

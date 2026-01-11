@@ -152,23 +152,63 @@ def split_at_cut_point(
     original_inputs = [inp.name for inp in graph.input if inp.name not in init_names]
     original_outputs = [out.name for out in graph.output]
 
+    # Build set of tensors produced by shard1 (nodes 0 to cut_node_idx)
+    shard1_nodes = nodes[0:cut_node_idx + 1]
+    shard1_outputs = set()
+    for node in shard1_nodes:
+        shard1_outputs.update(node.output)
+
+    # Build set of tensors consumed by shard2 (nodes cut_node_idx+1 to end)
+    shard2_nodes = nodes[cut_node_idx + 1:]
+    shard2_inputs_needed = set()
+    shard2_outputs_produced = set()
+    for node in shard2_nodes:
+        shard2_inputs_needed.update(node.input)
+        shard2_outputs_produced.update(node.output)
+
+    # Find all external inputs shard2 needs:
+    # - Not produced within shard2 itself
+    # - Not an initializer
+    # - Either produced by shard1 OR is an original model input
+    shard2_external_inputs = []
+    for inp in shard2_inputs_needed:
+        if inp in shard2_outputs_produced:
+            continue  # Produced within shard2
+        if inp in init_names:
+            continue  # Is an initializer (weights)
+        if inp in shard1_outputs or inp in original_inputs:
+            shard2_external_inputs.append(inp)
+
+    # Deduplicate while preserving order
+    seen = set()
+    shard2_external_inputs_deduped = []
+    for inp in shard2_external_inputs:
+        if inp not in seen:
+            seen.add(inp)
+            shard2_external_inputs_deduped.append(inp)
+    shard2_external_inputs = shard2_external_inputs_deduped
+
     # Shard 1: from start to cut node (inclusive)
-    # Output is the cut tensor
+    # Outputs: the cut tensor + any other tensors shard2 needs from shard1
+    shard1_output_names = list(shard2_external_inputs)  # All tensors shard2 needs
+    if cut_point.tensor_name not in shard1_output_names:
+        shard1_output_names.insert(0, cut_point.tensor_name)
+
     shard1 = extract_subgraph(
         model,
         start_node_idx=0,
         end_node_idx=cut_node_idx,
         input_names=original_inputs,
-        output_names=[cut_point.tensor_name],
+        output_names=shard1_output_names,
     )
 
     # Shard 2: from cut node + 1 to end
-    # Input is the cut tensor
+    # Inputs: all external tensors needed
     shard2 = extract_subgraph(
         model,
         start_node_idx=cut_node_idx + 1,
         end_node_idx=-1,
-        input_names=[cut_point.tensor_name],
+        input_names=shard2_external_inputs,
         output_names=original_outputs,
     )
 
@@ -238,9 +278,9 @@ def validate_cut_point(
         # Run shard 1
         shard1_outputs = run_inference(shard1, sample_inputs)
 
-        # Run shard 2 with shard 1's output as input
-        shard2_inputs = {cut_point.tensor_name: shard1_outputs[cut_point.tensor_name]}
-        shard2_outputs = run_inference(shard2, shard2_inputs)
+        # Run shard 2 with ALL of shard 1's outputs as inputs
+        # (handles skip connections and other cross-shard dependencies)
+        shard2_outputs = run_inference(shard2, shard1_outputs)
 
         # Compare outputs
         max_diff = 0.0
