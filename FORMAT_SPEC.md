@@ -173,6 +173,75 @@ A valid cut point must:
 3. Not be inside a control flow block (if/loop)
 4. Have reasonable tensor size for network transfer
 
+### Backend Compatibility
+
+`.omny` files are executed by `omny-compute` which supports multiple backends:
+
+| Backend | Provider | Requirements |
+|---------|----------|--------------|
+| **ort-CUDA** | NVIDIA GPUs | CUDA drivers |
+| **ort-ROCm** | AMD GPUs | ROCm drivers |
+| **ort-OpenVINO** | Intel GPUs/CPUs | OpenVINO runtime |
+| **ort-CPU** | Any CPU | None |
+| **wonnx-Vulkan** | Any GPU | Vulkan drivers |
+| **wonnx-Metal** | Apple GPUs | macOS/iOS |
+| **wonnx-DX12** | Windows GPUs | Windows 10+ |
+
+**Fallback chain**: CUDA → ROCm → OpenVINO → wonnx → CPU
+
+### wonnx Compatibility Requirements
+
+For models to run on the `wonnx` backend (Vulkan/Metal/DX12), they must meet:
+
+1. **Fixed Shapes**: No dynamic dimensions (except batch). wonnx/WebGPU requires known buffer sizes at compile time.
+
+2. **Supported Operators**: Only operators implemented in wonnx. Common supported ops include:
+   - Math: Add, Sub, Mul, Div, MatMul, Gemm, Pow, Sqrt, Exp, Log
+   - Activations: Relu, Sigmoid, Softmax, Tanh, Gelu, Silu
+   - Normalization: BatchNormalization, LayerNormalization
+   - Tensor: Reshape, Transpose, Concat, Slice, Gather, Split
+   - Reduction: ReduceMean, ReduceSum, ReduceMax
+   - Conditional: Where, ScatterElements
+
+   **Unsupported** (commonly used but missing):
+   - Einsum, GridSample, NonMaxSuppression, TopK, GRU, LSTM
+
+3. **Opset Version**: Opset 12-17 recommended.
+
+The `omnynet-export` tool checks compatibility at export time and reports which backends will work:
+
+```
+============================================================
+           Backend Compatibility Report
+============================================================
+
+  ort backends:
+    CUDA (NVIDIA)      [OK] Full support
+    ROCm (AMD)         [OK] Full support
+    OpenVINO (Intel)   [OK] Full support
+    CPU                [OK] Full support
+
+  wonnx backends:
+    Vulkan (Linux/Win) [OK] Full support
+    Metal (macOS)      [OK] Full support
+    DX12 (Windows)     [OK] Full support
+
+============================================================
+Model compatible with ALL backends.
+```
+
+### Fixing Dynamic Shapes
+
+Use the `--shape` option to fix dynamic dimensions:
+
+```bash
+omnynet-export enrich model.onnx -o model.omny \
+    --shape "input_ids:1,512" \
+    --shape "attention_mask:1,512"
+```
+
+This embeds fixed shapes, enabling wonnx compatibility while preserving ort flexibility.
+
 ## File Extension
 
 - **Extension**: `.omny`
@@ -213,4 +282,8 @@ for prop in model.metadata_props:
 
 ## Changelog
 
+- **1.1** (2026-01-24): Added backend compatibility section
+  - Documented ort and wonnx backend requirements
+  - Added wonnx operator compatibility constraints
+  - Documented shape fixing for wonnx compatibility
 - **1.0** (2026-01-06): Initial specification
