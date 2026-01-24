@@ -21,7 +21,17 @@ from .metadata import (
     ExportInfo,
 )
 from .analyzer import find_cut_points, analyze_graph, calculate_shard_configs
-from .format import embed_metadata, save_omny
+from .format import (
+    embed_metadata, save_omny,
+    save_omny_v2, OmnyV2Manifest, ProcessorConfig,
+    PreprocessConfig, PostprocessConfig,
+)
+from .compatibility import (
+    CompatibilityReport,
+    check_compatibility,
+    fix_dynamic_shapes,
+    format_compatibility_report,
+)
 
 
 @dataclass
@@ -37,6 +47,12 @@ class ExportConfig:
     model_architecture: str = "unknown"
     validate: bool = False  # Run actual inference to validate cut points
     validation_tolerance: float = 1e-4  # Max allowed output difference
+    inference_memory_mb: Optional[int] = None  # Manual override for VRAM requirement (auto-calculated if None)
+
+    # wonnx compatibility options
+    check_compatibility: bool = True  # Check wonnx/ort compatibility
+    fix_shapes: bool = False  # Fix dynamic shapes for wonnx
+    input_shapes: Optional[dict[str, list[int]]] = None  # Concrete shapes for fixing
 
 
 @dataclass
@@ -51,6 +67,7 @@ class ExportResult:
     error: Optional[str] = None
     validated: bool = False  # Whether cut points were validated
     validation_errors: list[str] = None  # Any validation errors
+    compatibility_report: Optional["CompatibilityReport"] = None  # Backend compatibility
 
     def summary(self) -> str:
         if not self.success:
@@ -391,11 +408,32 @@ def _process_onnx_model(
 ) -> ExportResult:
     """Common processing for ONNX models."""
 
+    compatibility_report = None
+
+    # Fix dynamic shapes if requested
+    if cfg.fix_shapes and cfg.input_shapes:
+        print("Fixing dynamic shapes for wonnx compatibility...")
+        onnx_model, changes = fix_dynamic_shapes(onnx_model, cfg.input_shapes)
+        for change in changes:
+            print(f"  {change}")
+        print()
+
     # Run shape inference
     try:
         onnx_model = onnx.shape_inference.infer_shapes(onnx_model)
     except Exception:
         pass  # Shape inference may fail, continue anyway
+
+    # Check backend compatibility
+    if cfg.check_compatibility:
+        compatibility_report = check_compatibility(onnx_model)
+
+        # If shapes were fixed, update report
+        if cfg.fix_shapes and cfg.input_shapes:
+            compatibility_report.shapes_fixed = True
+
+        # Print compatibility report
+        print(format_compatibility_report(compatibility_report))
 
     # Analyze graph
     analyses = analyze_graph(onnx_model)
@@ -404,8 +442,12 @@ def _process_onnx_model(
     total_bytes = analyses[-1].cumulative_bytes if analyses else 0
     total_mb = int(total_bytes / (1024 * 1024))
 
-    # Estimate inference memory (weights + activations + overhead)
-    inference_memory_mb = int(total_mb * 1.5)  # 50% overhead estimate
+    # Inference memory: use manual override if provided, otherwise estimate
+    if cfg.inference_memory_mb is not None:
+        inference_memory_mb = cfg.inference_memory_mb
+    else:
+        # Estimate inference memory (weights + activations + overhead)
+        inference_memory_mb = int(total_mb * 1.5)  # 50% overhead estimate
 
     # Calculate total parameters
     total_params = 0
@@ -514,6 +556,7 @@ def _process_onnx_model(
         allowed_shards=allowed_shards,
         validated=validated,
         validation_errors=validation_errors if validation_errors else None,
+        compatibility_report=compatibility_report,
     )
 
 
@@ -551,3 +594,264 @@ def _onnx_dtype_to_str(dtype: int) -> str:
         TensorProto.BFLOAT16: "bfloat16",
     }
     return dtype_map.get(dtype, "float32")
+
+
+# ============================================================================
+# v2 Format Export (with Native Processor Support)
+# ============================================================================
+
+@dataclass
+class ExportV2Config:
+    """Configuration for v2 format export with native processor support."""
+
+    # Model info
+    model_name: Optional[str] = None
+    model_architecture: str = "unknown"
+    task: str = ""  # "ocr", "detection", "classification", "embedding"
+
+    # Input/output types
+    input_type: str = "image"  # "image", "text", "tensor"
+    input_format: str = "base64"  # "base64", "bytes", "path"
+    output_type: str = "raw"  # "detection", "ocr", "embedding", "raw"
+    output_format: str = "json"  # "json", "bytes"
+
+    # Processor (native executables, not bundled in .omny file)
+    processor_type: str = "none"  # "native", "none"
+    processor_id: Optional[str] = None  # For native: "clip", "ocr", "sam2", "dino"
+
+    # Preprocessing (metadata for documentation/reference)
+    preprocess_resize: Optional[tuple[int, int]] = None  # [width, height]
+    preprocess_resize_mode: str = "exact"  # "exact", "preserve_aspect", "pad", "shortest_center_crop"
+    preprocess_normalize_mean: Optional[tuple[float, float, float]] = None
+    preprocess_normalize_std: Optional[tuple[float, float, float]] = None
+    preprocess_scale: float = 255.0
+    preprocess_channel_order: str = "RGB"
+
+    # Postprocessing
+    postprocess_type: str = "raw"  # "detection", "classification", "ocr"
+    postprocess_confidence_threshold: float = 0.5
+    postprocess_nms_threshold: Optional[float] = None
+    postprocess_labels: Optional[list[str]] = None
+
+    # Sharding (same as v1)
+    min_vram_mb: int = 1500
+    max_shard_size_mb: int = 1200
+    min_shards: int = 2
+    max_shards: int = 8
+    inference_memory_mb: Optional[int] = None
+
+
+@dataclass
+class ExportV2Result:
+    """Result of v2 export operation."""
+    success: bool
+    output_path: Optional[Path]
+    manifest: Optional[OmnyV2Manifest]
+    error: Optional[str] = None
+    
+    def summary(self) -> str:
+        if not self.success:
+            return f"Export failed: {self.error}"
+        return f"Exported .omny v2: {self.output_path}"
+
+
+def export_v2(
+    onnx_path: Union[str, Path],
+    output: Union[str, Path],
+    config: Optional[Union[dict, ExportV2Config]] = None,
+) -> ExportV2Result:
+    """
+    Export an ONNX model to .omny v2 format.
+
+    Note: Native processors are separate executables installed on the system,
+    not bundled in the .omny file.
+
+    Args:
+        onnx_path: Path to ONNX file
+        output: Output path for .omny file
+        config: v2 export configuration
+
+    Returns:
+        ExportV2Result with details
+    """
+    # Parse config
+    if config is None:
+        cfg = ExportV2Config()
+    elif isinstance(config, dict):
+        cfg = ExportV2Config(**config)
+    else:
+        cfg = config
+
+    onnx_path = Path(onnx_path)
+    output_path = Path(output)
+
+    if not onnx_path.exists():
+        return ExportV2Result(
+            success=False,
+            output_path=None,
+            manifest=None,
+            error=f"ONNX file not found: {onnx_path}",
+        )
+
+    try:
+        # Load ONNX model
+        onnx_model = onnx.load(str(onnx_path))
+
+        if cfg.model_name is None:
+            cfg.model_name = onnx_path.stem
+
+        # Extract input/output tensor names
+        input_names = []
+        for inp in onnx_model.graph.input:
+            if not any(init.name == inp.name for init in onnx_model.graph.initializer):
+                input_names.append(inp.name)
+
+        output_names = [out.name for out in onnx_model.graph.output]
+
+        # Calculate model size
+        total_bytes = sum(
+            len(init.raw_data) if init.raw_data else 0
+            for init in onnx_model.graph.initializer
+        )
+        total_mb = int(total_bytes / (1024 * 1024))
+
+        # Calculate parameters
+        total_params = 0
+        for init in onnx_model.graph.initializer:
+            num_elements = 1
+            for dim in init.dims:
+                num_elements *= dim
+            total_params += num_elements
+
+        # Inference memory estimate
+        inference_memory_mb = cfg.inference_memory_mb or int(total_mb * 1.5)
+
+        # Build preprocess config
+        preprocess = None
+        if cfg.preprocess_resize or cfg.preprocess_normalize_mean:
+            preprocess = PreprocessConfig(
+                resize=cfg.preprocess_resize,
+                resize_mode=cfg.preprocess_resize_mode,
+                normalize_mean=cfg.preprocess_normalize_mean,
+                normalize_std=cfg.preprocess_normalize_std,
+                scale=cfg.preprocess_scale,
+                channel_order=cfg.preprocess_channel_order,
+            )
+
+        # Build postprocess config
+        postprocess = None
+        if cfg.postprocess_type != "raw":
+            postprocess = PostprocessConfig(
+                postprocess_type=cfg.postprocess_type,
+                confidence_threshold=cfg.postprocess_confidence_threshold,
+                nms_threshold=cfg.postprocess_nms_threshold,
+                labels=cfg.postprocess_labels,
+            )
+
+        # Build manifest
+        manifest = OmnyV2Manifest(
+            model_name=cfg.model_name,
+            model_architecture=cfg.model_architecture,
+            task=cfg.task,
+            total_params=total_params,
+            total_size_mb=total_mb,
+            inference_memory_mb=inference_memory_mb,
+            input_type=cfg.input_type,
+            input_format=cfg.input_format,
+            input_tensor_names=input_names,
+            output_type=cfg.output_type,
+            output_format=cfg.output_format,
+            output_tensor_names=output_names,
+            processor=ProcessorConfig(
+                processor_type=cfg.processor_type,
+                processor_id=cfg.processor_id,
+            ),
+            preprocess=preprocess,
+            postprocess=postprocess,
+            sharding={
+                "min_vram_mb": cfg.min_vram_mb,
+                "max_shard_size_mb": cfg.max_shard_size_mb,
+                "min_shards": cfg.min_shards,
+                "max_shards": cfg.max_shards,
+            },
+        )
+
+        # Save v2 format
+        save_omny_v2(onnx_model, output_path, manifest)
+
+        return ExportV2Result(
+            success=True,
+            output_path=output_path,
+            manifest=manifest,
+        )
+
+    except Exception as e:
+        return ExportV2Result(
+            success=False,
+            output_path=None,
+            manifest=None,
+            error=str(e),
+        )
+
+
+def upgrade_to_v2(
+    omny_v1_path: Union[str, Path],
+    output: Union[str, Path],
+    task: str = "",
+    processor_type: str = "none",
+    processor_id: Optional[str] = None,
+) -> ExportV2Result:
+    """
+    Upgrade an existing .omny v1 file to v2 format.
+
+    Args:
+        omny_v1_path: Path to existing .omny v1 file
+        output: Output path for v2 file
+        task: Task type ("ocr", "detection", "embedding", etc.)
+        processor_type: "native" or "none"
+        processor_id: For native processors (e.g., "clip", "ocr", "sam2")
+
+    Returns:
+        ExportV2Result
+    """
+    from .format import load_omny
+
+    omny_v1_path = Path(omny_v1_path)
+    output_path = Path(output)
+
+    try:
+        # Load v1 file
+        model, metadata = load_omny(omny_v1_path)
+
+        if metadata is None:
+            return ExportV2Result(
+                success=False,
+                output_path=None,
+                manifest=None,
+                error="No OmnyNet metadata found in v1 file",
+            )
+
+        # Create v2 manifest from v1 metadata
+        manifest = OmnyV2Manifest.from_v1_metadata(metadata)
+        manifest.task = task
+        manifest.processor = ProcessorConfig(
+            processor_type=processor_type,
+            processor_id=processor_id,
+        )
+
+        # Save as v2
+        save_omny_v2(model, output_path, manifest)
+
+        return ExportV2Result(
+            success=True,
+            output_path=output_path,
+            manifest=manifest,
+        )
+
+    except Exception as e:
+        return ExportV2Result(
+            success=False,
+            output_path=None,
+            manifest=None,
+            error=str(e),
+        )

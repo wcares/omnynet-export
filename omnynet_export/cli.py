@@ -11,8 +11,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
-from .exporter import export_model, enrich_onnx, ExportConfig
-from .format import inspect_omny, validate_omny
+from .exporter import export_model, enrich_onnx, ExportConfig, export_v2, upgrade_to_v2, ExportV2Config
+from .format import inspect_omny, validate_omny, detect_omny_version, is_omny_v2
 
 console = Console()
 
@@ -122,6 +122,7 @@ def _run_auto_mode(model_path: str, output: Optional[str]):
 @click.option("--sample-input", "-i", type=click.Path(exists=True), help="Sample input .npy file")
 @click.option("--min-vram", default=1500, help="Minimum VRAM per node (MB)")
 @click.option("--max-shard-size", default=1200, help="Maximum shard size (MB)")
+@click.option("--inference-memory", type=int, default=None, help="Manual VRAM requirement for inference (MB). Auto-calculated if not provided.")
 @click.option("--name", help="Model name (default: filename)")
 def export(
     model_path: str,
@@ -129,6 +130,7 @@ def export(
     sample_input: Optional[str],
     min_vram: int,
     max_shard_size: int,
+    inference_memory: Optional[int],
     name: Optional[str],
 ):
     """Export a PyTorch model to .omny format."""
@@ -150,6 +152,7 @@ def export(
         min_vram_mb=min_vram,
         max_shard_size_mb=max_shard_size,
         model_name=name,
+        inference_memory_mb=inference_memory,
     )
 
     # Check if it's an ONNX file or PyTorch
@@ -174,7 +177,11 @@ def export(
 @click.option("--validate", "-v", is_flag=True, help="Validate cut points by running actual inference")
 @click.option("--min-vram", default=1500, help="Minimum VRAM per node (MB)")
 @click.option("--max-shard-size", default=1200, help="Maximum shard size (MB)")
+@click.option("--inference-memory", type=int, default=None, help="Manual VRAM requirement for inference (MB). Auto-calculated if not provided.")
 @click.option("--name", help="Model name (default: filename)")
+@click.option("--fix-shapes", is_flag=True, help="Fix dynamic shapes for wonnx compatibility")
+@click.option("--shape", "-s", multiple=True, help="Input shape: 'input_name:dim1,dim2,...' (e.g., 'pixel_values:1,3,224,224')")
+@click.option("--no-compat-check", is_flag=True, help="Skip backend compatibility checking")
 def enrich(
     onnx_path: str,
     output: str,
@@ -182,7 +189,11 @@ def enrich(
     validate: bool,
     min_vram: int,
     max_shard_size: int,
+    inference_memory: Optional[int],
     name: Optional[str],
+    fix_shapes: bool,
+    shape: tuple,
+    no_compat_check: bool,
 ):
     """Enrich an existing ONNX model with OmnyNet metadata."""
     import numpy as np
@@ -216,11 +227,32 @@ def enrich(
                         shape.append(1)  # Default dynamic dim to 1
                 input_data[inp.name] = np.random.randn(*shape).astype(np.float32)
 
+    # Parse shape options
+    input_shapes = None
+    if shape:
+        input_shapes = {}
+        for s in shape:
+            if ":" not in s:
+                console.print(f"[red]Invalid shape format:[/] {s}")
+                console.print("Expected format: 'input_name:dim1,dim2,...'")
+                sys.exit(1)
+            name_part, dims_part = s.split(":", 1)
+            try:
+                dims = [int(d.strip()) for d in dims_part.split(",")]
+                input_shapes[name_part.strip()] = dims
+            except ValueError:
+                console.print(f"[red]Invalid dimensions:[/] {dims_part}")
+                sys.exit(1)
+
     config = ExportConfig(
         min_vram_mb=min_vram,
         max_shard_size_mb=max_shard_size,
         model_name=name,
         validate=validate,
+        inference_memory_mb=inference_memory,
+        check_compatibility=not no_compat_check,
+        fix_shapes=fix_shapes or bool(input_shapes),
+        input_shapes=input_shapes,
     )
 
     result = enrich_onnx(onnx_path, output_path, sample_input=input_data, config=config)
@@ -408,6 +440,137 @@ def _print_metadata(meta):
     table.add_row("Cuts Validated", validated_status)
 
     console.print(table)
+
+
+@main.command()
+@click.argument("onnx_path", type=click.Path(exists=True))
+@click.option("--output", "-o", required=True, help="Output .omny file path")
+@click.option("--name", help="Model name (default: filename)")
+@click.option("--task", default="", help="Task type: ocr, detection, classification, embedding")
+@click.option("--input-type", default="image", help="Input type: image, text, tensor")
+@click.option("--output-type", default="raw", help="Output type: detection, ocr, embedding, raw")
+@click.option("--processor", default="native", help="Processor type: native, none")
+@click.option("--processor-id", help="Native processor ID: clip, ocr, sam2, dino")
+@click.option("--confidence-threshold", type=float, default=0.5, help="Postprocess confidence threshold")
+def export_v2_cmd(
+    onnx_path: str,
+    output: str,
+    name: Optional[str],
+    task: str,
+    input_type: str,
+    output_type: str,
+    processor: str,
+    processor_id: Optional[str],
+    confidence_threshold: float,
+):
+    """Export ONNX model to .omny v2 format with native processor support.
+
+    Native processors are separate executables that handle preprocessing
+    and postprocessing. Install them at ~/.local/share/omnynet/processors/
+
+    Examples:
+
+        # CLIP model with native processor
+        omnynet-export export-v2 clip.onnx -o clip.omny \\
+            --task embedding --processor native --processor-id clip
+
+        # OCR model
+        omnynet-export export-v2 det.onnx -o det.omny \\
+            --task ocr --processor native --processor-id ocr
+
+        # No processor (raw tensor input/output)
+        omnynet-export export-v2 model.onnx -o model.omny --processor none
+    """
+    from pathlib import Path
+
+    onnx_path = Path(onnx_path)
+    output_path = Path(output)
+
+    console.print(f"[bold blue]Exporting to v2 format:[/] {onnx_path}")
+    console.print()
+
+    config = ExportV2Config(
+        model_name=name,
+        task=task,
+        input_type=input_type,
+        output_type=output_type,
+        processor_type=processor,
+        processor_id=processor_id,
+        postprocess_type=output_type if output_type != "raw" else "raw",
+        postprocess_confidence_threshold=confidence_threshold,
+    )
+
+    result = export_v2(onnx_path, output_path, config)
+    
+    if result.success:
+        console.print(f"[bold green]Success![/] Saved to {output_path}")
+        console.print()
+        
+        if result.manifest:
+            table = Table(title="v2 Manifest", show_header=False)
+            table.add_column("Property", style="cyan")
+            table.add_column("Value")
+            
+            table.add_row("Version", "2.0")
+            table.add_row("Model", result.manifest.model_name)
+            table.add_row("Task", result.manifest.task or "(not set)")
+            table.add_row("Input Type", result.manifest.input_type)
+            table.add_row("Output Type", result.manifest.output_type)
+            table.add_row("Processor", result.manifest.processor.processor_type)
+            if result.manifest.processor.processor_id:
+                table.add_row("Processor ID", result.manifest.processor.processor_id)
+            table.add_row("Size", f"{result.manifest.total_size_mb} MB")
+            table.add_row("VRAM", f"{result.manifest.inference_memory_mb} MB")
+            
+            console.print(table)
+    else:
+        console.print(f"[bold red]Failed:[/] {result.error}")
+        sys.exit(1)
+
+
+@main.command()
+@click.argument("omny_v1_path", type=click.Path(exists=True))
+@click.option("--output", "-o", required=True, help="Output .omny v2 file path")
+@click.option("--task", default="", help="Task type: ocr, detection, classification, embedding")
+@click.option("--processor", default="none", help="Processor type: native, none")
+@click.option("--processor-id", help="Native processor ID (e.g., clip, ocr, sam2, dino)")
+def upgrade(
+    omny_v1_path: str,
+    output: str,
+    task: str,
+    processor: str,
+    processor_id: Optional[str],
+):
+    """Upgrade a v1 .omny file to v2 format.
+
+    This converts an existing .omny file (ONNX with metadata) to the new
+    v2 format with native processor support.
+
+    Native processors are separate executables installed at:
+    ~/.local/share/omnynet/processors/<processor_id>-processor
+
+    Example:
+        omnynet-export upgrade model-v1.omny -o model-v2.omny \\
+            --task embedding --processor native --processor-id clip
+    """
+    console.print(f"[bold blue]Upgrading to v2:[/] {omny_v1_path}")
+    console.print()
+
+    result = upgrade_to_v2(
+        omny_v1_path,
+        output,
+        task=task,
+        processor_type=processor,
+        processor_id=processor_id,
+    )
+
+    if result.success:
+        console.print(f"[bold green]Success![/] Upgraded to {output}")
+        if processor == "native" and processor_id:
+            console.print(f"[dim]Note: Requires {processor_id}-processor executable[/]")
+    else:
+        console.print(f"[bold red]Failed:[/] {result.error}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
