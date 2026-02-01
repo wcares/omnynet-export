@@ -7,7 +7,7 @@
 //!   cat image.png | sam2-processor preprocess
 //!   cat tensors.json | sam2-processor postprocess
 
-use image::{DynamicImage, GenericImageView, imageops::FilterType, Rgba, RgbaImage};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
@@ -55,28 +55,18 @@ fn preprocess() -> Result<(), Box<dyn std::error::Error>> {
     let img = image::load_from_memory(&input)?;
     let (orig_w, orig_h) = img.dimensions();
 
-    // Resize longest side to TARGET_SIZE, pad to square
-    let scale = TARGET_SIZE as f32 / orig_w.max(orig_h) as f32;
-    let new_w = (orig_w as f32 * scale).round() as u32;
-    let new_h = (orig_h as f32 * scale).round() as u32;
-
-    // Resize with bilinear
-    let resized = img.resize_exact(new_w, new_h, FilterType::Triangle);
-
-    // Create padded square image (black padding)
-    let mut padded = RgbaImage::from_pixel(TARGET_SIZE, TARGET_SIZE, Rgba([0, 0, 0, 255]));
-    image::imageops::replace(&mut padded, &resized.to_rgba8(), 0, 0);
-    let padded = DynamicImage::ImageRgba8(padded);
+    // SAM2 uses simple stretch resize to 1024x1024 (no aspect ratio preservation)
+    // This matches PyTorch's Resize((1024, 1024)) behavior
+    let resized = img.resize_exact(TARGET_SIZE, TARGET_SIZE, FilterType::Triangle);
 
     // Convert to normalized tensor
-    let tensor = image_to_normalized_tensor(&padded);
+    let tensor = image_to_normalized_tensor(&resized);
 
-    // Output as JSON with scale info for postprocessing
+    // Output as JSON with original size info for postprocessing (mask rescaling)
     let mut output: HashMap<String, serde_json::Value> = HashMap::new();
     output.insert("image".to_string(), serde_json::json!(tensor));
     output.insert("_shape".to_string(), serde_json::json!([1, 3, TARGET_SIZE, TARGET_SIZE]));
     output.insert("_orig_size".to_string(), serde_json::json!([orig_h, orig_w]));
-    output.insert("_scale".to_string(), serde_json::json!([scale]));
 
     let json = serde_json::to_vec(&output)?;
     io::stdout().write_all(&json)?;

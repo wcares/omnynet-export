@@ -6,6 +6,8 @@ members = [
     "ocr-native",
     "sam2-native",
     "dino-native",
+    "paddleocr-native",
+    "semantic-native",
 ]
 
 [workspace.dependencies]
