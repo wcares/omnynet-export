@@ -17,29 +17,42 @@ from .format import inspect_omny, validate_omny, detect_omny_version, is_omny_v2
 console = Console()
 
 
-@click.group(invoke_without_command=True)
+class AutoModeGroup(click.Group):
+    """Click group that supports auto mode: unrecognized args are treated as model paths."""
+
+    def parse_args(self, ctx, args):
+        # If the first arg looks like a file (not a subcommand), route to auto mode
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            # Inject "auto" subcommand before the file path
+            args = ["auto"] + args
+        return super().parse_args(ctx, args)
+
+
+@click.group(cls=AutoModeGroup)
 @click.version_option(version="0.1.0")
-@click.argument("model_path", type=click.Path(exists=True), required=False)
-@click.option("--output", "-o", help="Output .omny file path (default: same name as input)")
-@click.pass_context
-def main(ctx, model_path: Optional[str], output: Optional[str]):
+def main():
     """OmnyNet Export - Convert models to .omny format for distributed inference.
 
     Simple usage (auto mode):
-        omnynet-export model.onnx          # → model.omny
-        omnynet-export model.pt            # → model.omny
+        omnynet-export model.onnx          # -> model.omny
+        omnynet-export model.pt            # -> model.omny
         omnynet-export model.onnx -o out.omny
 
     For more control, use subcommands:
         omnynet-export export ...
         omnynet-export enrich ...
         omnynet-export inspect ...
+        omnynet-export sign ...
     """
-    # If a model path is provided without subcommand, run auto mode
-    if model_path and ctx.invoked_subcommand is None:
-        _run_auto_mode(model_path, output)
-    elif ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
+    pass
+
+
+@main.command(hidden=True)
+@click.argument("model_path", type=click.Path(exists=True))
+@click.option("--output", "-o", help="Output .omny file path")
+def auto(model_path: str, output: Optional[str]):
+    """Auto mode (hidden) - detect model type and convert."""
+    _run_auto_mode(model_path, output)
 
 
 def _run_auto_mode(model_path: str, output: Optional[str]):
@@ -571,6 +584,107 @@ def upgrade(
     else:
         console.print(f"[bold red]Failed:[/] {result.error}")
         sys.exit(1)
+
+
+@main.command()
+@click.argument("files", nargs=-1, type=click.Path(exists=True), required=True)
+@click.option("--key", "-k", required=True, type=click.Path(exists=True), help="Ed25519 signing key (32-byte raw)")
+def sign(files: tuple, key: str):
+    """Sign files with Ed25519 (produces .sig companions).
+
+    Signs one or more files for fortress integrity verification.
+    The signing key is a raw 32-byte Ed25519 private key.
+
+    Examples:
+
+        # Sign a single model
+        omnynet-export sign model.omny --key ~/.omnynet-keys/omnynet-signing.key
+
+        # Sign multiple files
+        omnynet-export sign *.omny processors/* --key signing.key
+    """
+    from .signing import load_signing_key, sign_and_write, sha256_file
+
+    private_key = load_signing_key(Path(key))
+
+    for file_path in files:
+        file_path = Path(file_path)
+        if not file_path.is_file():
+            console.print(f"[yellow]SKIP:[/] {file_path} (not a file)")
+            continue
+
+        file_hash = sha256_file(file_path)
+        sig_path = sign_and_write(file_path, private_key)
+        console.print(
+            f"[green]SIGNED:[/] {file_path.name} -> {sig_path.name} "
+            f"(sha256: {file_hash.hex()[:16]}...)"
+        )
+
+
+@main.command()
+@click.argument("files", nargs=-1, type=click.Path(exists=True), required=True)
+@click.option("--pubkey", "-p", required=True, type=click.Path(exists=True), help="Ed25519 public key (hex-encoded)")
+def verify(files: tuple, pubkey: str):
+    """Verify signed files against their .sig companions.
+
+    Examples:
+
+        omnynet-export verify model.omny --pubkey ~/.omnynet-keys/omnynet-signing.pub
+    """
+    from .signing import load_public_key, verify_file, sig_path_for
+
+    public_key = load_public_key(Path(pubkey))
+    all_ok = True
+
+    for file_path in files:
+        file_path = Path(file_path)
+        sig = sig_path_for(file_path)
+
+        if not sig.exists():
+            console.print(f"[red]FAIL:[/] {file_path} -- signature file not found")
+            all_ok = False
+            continue
+
+        try:
+            verify_file(file_path, sig, public_key)
+            console.print(f"[green]OK:[/] {file_path}")
+        except Exception as e:
+            console.print(f"[red]FAIL:[/] {file_path} -- {e}")
+            all_ok = False
+
+    if not all_ok:
+        sys.exit(1)
+
+
+@main.command("generate-key")
+@click.option("--out", "-o", required=True, type=click.Path(), help="Output directory for key files")
+def generate_key(out: str):
+    """Generate a new Ed25519 signing keypair.
+
+    Creates two files:
+        omnynet-signing.key  (private, 32 bytes, mode 0600)
+        omnynet-signing.pub  (public, hex-encoded)
+    """
+    from .signing import generate_keypair, load_signing_key, public_key_as_rust
+
+    key_path, pub_path = generate_keypair(Path(out))
+    console.print("[green]Key pair generated:[/]")
+    console.print(f"  Private: {key_path} [dim](KEEP SECRET)[/]")
+    console.print(f"  Public:  {pub_path}")
+    console.print()
+    console.print("[dim]Embed this in fortress.rs OMNYNET_PUBLIC_KEY:[/]")
+    private_key = load_signing_key(key_path)
+    console.print(public_key_as_rust(private_key))
+
+
+@main.command("show-pubkey")
+@click.option("--key", "-k", required=True, type=click.Path(exists=True), help="Ed25519 signing key (32-byte raw)")
+def show_pubkey(key: str):
+    """Print the public key as a Rust [u8; 32] array literal."""
+    from .signing import load_signing_key, public_key_as_rust
+
+    private_key = load_signing_key(Path(key))
+    console.print(public_key_as_rust(private_key))
 
 
 if __name__ == "__main__":

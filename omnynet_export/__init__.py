@@ -28,6 +28,7 @@ from .compatibility import (
     CompatibilityReport,
     get_wonnx_supported_ops,
 )
+from .signing import sign_file, verify_file, sign_and_write, generate_keypair
 
 __all__ = [
     "export_model",
@@ -47,5 +48,9 @@ __all__ = [
     "fix_dynamic_shapes",
     "CompatibilityReport",
     "get_wonnx_supported_ops",
+    "sign_file",
+    "verify_file",
+    "sign_and_write",
+    "generate_keypair",
     "__version__",
 ]
