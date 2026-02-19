@@ -43,11 +43,18 @@ htmlcov/
 
 # Models (don't commit large model files)
 *.onnx
+*.onnx.data
 *.omny
 *.pt
 *.pth
 *.bin
 *.safetensors
+
+# Signatures (generated, not committed)
+*.sig
+
+# Rust build artifacts
+**/target/
 
 # Test outputs
 test_outputs/
@@ -58,4 +65,3 @@ test_outputs/
 # OS
 .DS_Store
 Thumbs.db
-IMPLEMENTATION_PLAN.md

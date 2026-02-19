@@ -157,11 +157,20 @@ fn preprocess() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No image provided".into());
     };
 
-    // Extract text prompt
-    let text_prompt = json.get("prompt")
+    // Extract text prompt and normalize for GroundingDINO format.
+    // The model requires at least 3 special tokens (CLS, one separator, SEP).
+    // Prompts must contain '.' separators between categories, e.g. "cat . dog .".
+    // If no dots present, append " ." to ensure minimum separator count.
+    let raw_prompt = json.get("prompt")
         .or_else(|| json.get("text"))
         .and_then(|v| v.as_str())
         .unwrap_or("object");
+    let text_prompt = if !raw_prompt.contains('.') {
+        format!("{} .", raw_prompt.trim_end())
+    } else {
+        raw_prompt.to_string()
+    };
+    let text_prompt = text_prompt.as_str();
 
     // Decode and preprocess image
     let img = image::load_from_memory(&image_bytes)?;
@@ -178,13 +187,19 @@ fn preprocess() -> Result<(), Box<dyn std::error::Error>> {
     // Tokenize text
     let (input_ids, attention_mask, token_type_ids) = tokenize_text(text_prompt, &vocab);
 
-    // Output as JSON (flat arrays only - no metadata objects)
+    // Output as JSON with shape hints for variable-length tensors
+    let seq_len = input_ids.len();
     let output = serde_json::json!({
         "pixel_values": pixel_values,
+        "pixel_values_shape": [1, 3, DINO_IMAGE_SIZE, DINO_IMAGE_SIZE],
         "input_ids": input_ids,
+        "input_ids_shape": [1, seq_len],
         "attention_mask": attention_mask,
+        "attention_mask_shape": [1, seq_len],
         "token_type_ids": token_type_ids,
-        "pixel_mask": pixel_mask
+        "token_type_ids_shape": [1, seq_len],
+        "pixel_mask": pixel_mask,
+        "pixel_mask_shape": [1, DINO_IMAGE_SIZE, DINO_IMAGE_SIZE]
     });
 
     let json_bytes = serde_json::to_vec(&output)?;
