@@ -38,6 +38,9 @@ fn get_chars() -> &'static Vec<String> {
         let paths = [
             PathBuf::from("/tmp/ppocr_keys.txt"),
             dirs::data_local_dir()
+                .map(|d| d.join("omnynet").join("models").join("ocr").join("ppocr_keys.txt"))
+                .unwrap_or_default(),
+            dirs::data_local_dir()
                 .map(|d| d.join("omnynet").join("paddleocr").join("ppocr_keys.txt"))
                 .unwrap_or_default(),
         ];
@@ -69,6 +72,9 @@ fn get_chars() -> &'static Vec<String> {
 fn recognizer_path() -> PathBuf {
     let paths = [
         PathBuf::from("/tmp/ppocr_rec.onnx"),
+        dirs::data_local_dir()
+            .map(|d| d.join("omnynet").join("models").join("ocr").join("rec.onnx"))
+            .unwrap_or_default(),
         dirs::data_local_dir()
             .map(|d| d.join("omnynet").join("paddleocr").join("models").join("rec.onnx"))
             .unwrap_or_default(),

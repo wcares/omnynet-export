@@ -1,0 +1,16 @@
+[package]
+name = "whisper-processor"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "whisper-processor"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+hound = "3.5"
+rustfft = "6.2"
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic"] }
+dirs = "5.0"

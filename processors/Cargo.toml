@@ -8,6 +8,7 @@ members = [
     "dino-native",
     "paddleocr-native",
     "semantic-native",
+    "whisper-native",
 ]
 
 [workspace.dependencies]
