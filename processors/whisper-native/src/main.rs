@@ -476,9 +476,9 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
     let text = text.trim().to_string();
     eprintln!("[whisper] Transcription ({} tokens): {:?}", generated_tokens.len(), &text[..text.len().min(100)]);
 
-    // Output JSON
+    // Output JSON — use "type": "json" for omny-compute ProcessorOutput compatibility
     let output = serde_json::json!({
-        "type": "transcription",
+        "type": "json",
         "text": text,
         "language": "en",
         "tokens": generated_tokens.len(),
