@@ -22,9 +22,9 @@ const CHUNK_LENGTH: usize = 30; // seconds
 const N_SAMPLES: usize = SAMPLE_RATE as usize * CHUNK_LENGTH; // 480000
 const N_FRAMES: usize = N_SAMPLES / HOP_LENGTH; // 3000
 
-/// Whisper special tokens
-const SOT: i64 = 50257;       // <|startoftranscript|>
-const EOT: i64 = 50256;       // <|endoftext|>
+/// Whisper special tokens (HuggingFace Optimum export IDs)
+const SOT: i64 = 50258;       // <|startoftranscript|>
+const EOT: i64 = 50257;       // <|endoftext|>
 const LANG_EN: i64 = 50259;   // <|en|>
 const TRANSCRIBE: i64 = 50359; // <|transcribe|>
 const NO_TIMESTAMPS: i64 = 50363; // <|notimestamps|>
@@ -464,8 +464,8 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
     let generated_tokens = &tokens[4..]; // Skip SOT, lang, task, notimestamps
     let text: String = generated_tokens.iter()
         .filter_map(|&id| {
-            // Skip special tokens (>= 50256)
-            if id >= 50256 {
+            // Skip special tokens (>= 50257)
+            if id >= 50257 {
                 return None;
             }
             vocab.get(&id).map(|s| decode_token(s))
