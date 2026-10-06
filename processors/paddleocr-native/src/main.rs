@@ -26,8 +26,13 @@ const BOX_THRESH: f32 = 0.5;
 const REC_HEIGHT: u32 = 48;
 const REC_WIDTH: u32 = 320;
 
-/// Temp file for passing image between preprocess and postprocess
-const TEMP_IMAGE_PATH: &str = "/tmp/paddleocr-processor-input.png";
+/// Temp file for passing the image between preprocess and postprocess: in the OS temp dir (the old fixed `/tmp/...` does not exist on a
+/// stock Windows box and is shared by every account on Linux), tagged with the user so two accounts never read each other's image.
+fn temp_image_path() -> PathBuf {
+    let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
+    let user: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+    std::env::temp_dir().join(format!("paddleocr-processor-input-{user}.png"))
+}
 
 /// Character dictionary (loaded lazily)
 static CHARS: OnceLock<Vec<String>> = OnceLock::new();
@@ -36,7 +41,9 @@ fn get_chars() -> &'static Vec<String> {
     CHARS.get_or_init(|| {
         // Try to load from standard locations
         let paths = [
-            PathBuf::from("/tmp/ppocr_keys.txt"),
+            dirs::data_dir()
+                .map(|d| d.join("omnynet").join("models").join("ocr").join("ppocr_keys.txt"))
+                .unwrap_or_default(),
             dirs::data_local_dir()
                 .map(|d| d.join("omnynet").join("models").join("ocr").join("ppocr_keys.txt"))
                 .unwrap_or_default(),
@@ -71,7 +78,9 @@ fn get_chars() -> &'static Vec<String> {
 /// Path to recognition ONNX model
 fn recognizer_path() -> PathBuf {
     let paths = [
-        PathBuf::from("/tmp/ppocr_rec.onnx"),
+        dirs::data_dir()
+            .map(|d| d.join("omnynet").join("models").join("ocr").join("rec.onnx"))
+            .unwrap_or_default(),
         dirs::data_local_dir()
             .map(|d| d.join("omnynet").join("models").join("ocr").join("rec.onnx"))
             .unwrap_or_default(),
@@ -130,7 +139,7 @@ fn preprocess() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[paddleocr] Original image: {}x{}", orig_w, orig_h);
 
     // Save for postprocess
-    img.save(TEMP_IMAGE_PATH)?;
+    img.save(temp_image_path())?;
 
     // Calculate resize dimensions
     let ratio = if orig_w.max(orig_h) > DET_LIMIT_SIDE {
@@ -180,8 +189,6 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
 
-    // Debug: save raw input to file
-    std::fs::write("/tmp/postprocess_input.json", &input)?;
     eprintln!("[paddleocr] Postprocess input size: {} bytes", input.len());
 
     let tensors: serde_json::Value = serde_json::from_slice(&input)?;
@@ -209,7 +216,7 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Load original image to get dimensions for shape inference
-    let orig_img = image::open(TEMP_IMAGE_PATH)?;
+    let orig_img = image::open(temp_image_path())?;
     let (orig_w, orig_h) = orig_img.dimensions();
 
     // Calculate detection map dimensions based on preprocessing
@@ -283,7 +290,7 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
     io::stdout().write_all(&json)?;
 
     // Cleanup
-    let _ = std::fs::remove_file(TEMP_IMAGE_PATH);
+    let _ = std::fs::remove_file(temp_image_path());
 
     Ok(())
 }
