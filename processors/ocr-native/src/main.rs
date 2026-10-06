@@ -32,8 +32,13 @@ const TEXT_THRESHOLD: f32 = 0.3;
 const LOW_TEXT: f32 = 0.2;
 const MIN_AREA: u32 = 50;
 
-/// Temp file for passing image between preprocess and postprocess
-const TEMP_IMAGE_PATH: &str = "/tmp/ocr-processor-input.png";
+/// Temp file for passing the image between preprocess and postprocess: in the OS temp dir (the old fixed `/tmp/...` does not exist on a
+/// stock Windows box and is shared by every account on Linux), tagged with the user so two accounts never read each other's image.
+fn temp_image_path() -> PathBuf {
+    let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
+    let user: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+    std::env::temp_dir().join(format!("ocr-processor-input-{user}.png"))
+}
 
 /// Character set for English recognition (EasyOCR model - 95 chars)
 static CHARS: OnceLock<Vec<char>> = OnceLock::new();
@@ -51,11 +56,12 @@ fn get_chars() -> &'static Vec<char> {
 /// Path to recognizer ONNX model
 fn recognizer_path() -> PathBuf {
     // Look in standard locations (asmud EasyOCR ONNX from HuggingFace)
+    // The agent keeps its models under `dirs::data_dir()/omnynet` (Windows: %APPDATA%); `data_local_dir()` is %LOCALAPPDATA% there, a different
+    // directory, so both are searched, the agent's first. No fixed dev-machine path.
+    let rel = ["omnynet", "models", "ocr", "recognizer.onnx"];
     let paths = [
-        PathBuf::from("/home/immortalb/.cache/huggingface/hub/models--asmud--EasyOCR-onnx/snapshots/4cb20758ed63725b7b57deb48b8e64b3217053b0/english_g2_jpqd.onnx"),
-        dirs::data_local_dir()
-            .map(|d| d.join("omnynet").join("models").join("ocr").join("recognizer.onnx"))
-            .unwrap_or_default(),
+        dirs::data_dir().map(|d| rel.iter().fold(d, |a, p| a.join(p))).unwrap_or_default(),
+        dirs::data_local_dir().map(|d| rel.iter().fold(d, |a, p| a.join(p))).unwrap_or_default(),
     ];
 
     for p in &paths {
@@ -104,7 +110,7 @@ fn preprocess() -> Result<(), Box<dyn std::error::Error>> {
     let (orig_w, orig_h) = img.dimensions();
 
     // Save original image for postprocess to use for cropping
-    img.save(TEMP_IMAGE_PATH)?;
+    img.save(temp_image_path())?;
 
     // Resize to detector input size (608x800) preserving aspect ratio with padding
     let scale = f32::min(DET_HEIGHT as f32 / orig_h as f32, DET_WIDTH as f32 / orig_w as f32);
@@ -151,7 +157,7 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Load original image for cropping
-    let orig_img = image::open(TEMP_IMAGE_PATH)?;
+    let orig_img = image::open(temp_image_path())?;
     let (orig_w, orig_h) = orig_img.dimensions();
 
     // Detector output is [1, 304, 400, 2]
@@ -223,7 +229,7 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
     io::stdout().write_all(&json)?;
 
     // Cleanup temp file
-    let _ = std::fs::remove_file(TEMP_IMAGE_PATH);
+    let _ = std::fs::remove_file(temp_image_path());
 
     Ok(())
 }
