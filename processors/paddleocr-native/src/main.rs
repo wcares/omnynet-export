@@ -13,14 +13,24 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// PaddleOCR normalization: (x/255 - 0.5) / 0.5
+/// PaddleOCR RECOGNITION normalization: (x/255 - 0.5) / 0.5
 const NORM_MEAN: f32 = 0.5;
 const NORM_STD: f32 = 0.5;
+
+/// PaddleOCR DB DETECTION normalization: ImageNet mean/std, applied per channel in the BGR order the tensor is built in (upstream
+/// tools/infer/predict_det.py NormalizeImage: mean [0.485, 0.456, 0.406], std [0.229, 0.224, 0.225] on a BGR image). The detector
+/// used to get the recognizer's (x - 0.5) / 0.5, which skews its probability map: big text collapsed to one letter.
+const DET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+const DET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 /// Detection parameters
 const DET_LIMIT_SIDE: u32 = 960;
 const DET_THRESH: f32 = 0.3;
 const BOX_THRESH: f32 = 0.5;
+/// DB "unclip": the detector marks a SHRUNKEN text kernel; each box is pushed out by area * ratio / perimeter (upstream
+/// ppocr/postprocess/db_postprocess.py unclip, inference default det_db_unclip_ratio 1.5). Without it the crops cut off the tops
+/// and bottoms of letters and the recognizer misreads them.
+const UNCLIP_RATIO: f32 = 1.5;
 
 /// Recognition parameters
 const REC_HEIGHT: u32 = 48;
@@ -55,10 +65,7 @@ fn get_chars() -> &'static Vec<String> {
         for path in &paths {
             if path.exists() {
                 if let Ok(content) = std::fs::read_to_string(path) {
-                    let mut chars: Vec<String> = vec!["".to_string()]; // blank at index 0
-                    for line in content.lines() {
-                        chars.push(line.to_string());
-                    }
+                    let chars = chars_from_dict(&content);
                     eprintln!("[paddleocr] Loaded {} characters from {:?}", chars.len(), path);
                     return chars;
                 }
@@ -73,6 +80,19 @@ fn get_chars() -> &'static Vec<String> {
         }
         chars
     })
+}
+
+/// The CTC table for a PaddleOCR dictionary: blank at index 0, one entry per dictionary line, then " " LAST. PaddleOCR rec models
+/// are trained with use_space_char, so the model has one more class than blank + dictionary (upstream
+/// ppocr/postprocess/rec_postprocess.py appends " "); without it every predicted space fell off the end and was dropped
+/// (shipped rec.onnx: 438 classes = 1 + 436 + 1).
+fn chars_from_dict(content: &str) -> Vec<String> {
+    let mut chars: Vec<String> = vec!["".to_string()]; // blank at index 0
+    for line in content.lines() {
+        chars.push(line.trim_end_matches('\r').to_string());
+    }
+    chars.push(" ".to_string()); // use_space_char
+    chars
 }
 
 /// Path to recognition ONNX model
@@ -529,11 +549,12 @@ fn extract_boxes(prob_map: &[f32], width: usize, height: usize, orig_w: u32, ori
                 continue;
             }
 
-            // Scale to original image coordinates
-            let x1 = (min_x as f32 * scale_x) as u32;
-            let y1 = (min_y as f32 * scale_y) as u32;
-            let x2 = ((max_x + 1) as f32 * scale_x).min(orig_w as f32) as u32;
-            let y2 = ((max_y + 1) as f32 * scale_y).min(orig_h as f32) as u32;
+            // Unclip (in map pixels), then scale to original image coordinates
+            let d = unclip_distance(box_w as f32, box_h as f32);
+            let x1 = ((min_x as f32 - d).max(0.0) * scale_x) as u32;
+            let y1 = ((min_y as f32 - d).max(0.0) * scale_y) as u32;
+            let x2 = (((max_x + 1) as f32 + d) * scale_x).min(orig_w as f32) as u32;
+            let y2 = (((max_y + 1) as f32 + d) * scale_y).min(orig_h as f32) as u32;
 
             boxes.push(TextBox {
                 x1,
@@ -558,6 +579,11 @@ fn extract_boxes(prob_map: &[f32], width: usize, height: usize, orig_w: u32, ori
     boxes
 }
 
+/// How far each edge of a `w` x `h` kernel box moves out: area * UNCLIP_RATIO / perimeter (upstream's polygon offset distance).
+fn unclip_distance(w: f32, h: f32) -> f32 {
+    w * h * UNCLIP_RATIO / (2.0 * (w + h))
+}
+
 /// Convert image to PaddleOCR tensor format (CHW, BGR, normalized)
 fn image_to_paddle_tensor(img: &DynamicImage) -> Vec<f32> {
     let rgb = img.to_rgb8();
@@ -565,14 +591,14 @@ fn image_to_paddle_tensor(img: &DynamicImage) -> Vec<f32> {
 
     let mut tensor = Vec::with_capacity((3 * width * height) as usize);
 
-    // BGR order for PaddleOCR
+    // BGR order for PaddleOCR, detection normalization (DET_MEAN / DET_STD index = BGR channel, as upstream)
     for c in 0..3 {
         let channel_idx = 2 - c; // BGR mapping
         for y in 0..height {
             for x in 0..width {
                 let pixel = rgb.get_pixel(x, y);
                 let value = pixel[channel_idx] as f32 / 255.0;
-                let normalized = (value - NORM_MEAN) / NORM_STD;
+                let normalized = (value - DET_MEAN[c]) / DET_STD[c];
                 tensor.push(normalized);
             }
         }
@@ -616,4 +642,51 @@ fn infer_shape(value: &serde_json::Value) -> Vec<usize> {
     }
 
     shape
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_dictionary_table_has_the_space_class_last() {
+        let chars = chars_from_dict("a\nb\r\nc\n");
+        assert_eq!(chars, vec!["", "a", "b", "c", " "]);
+    }
+
+    #[test]
+    fn a_predicted_space_is_decoded_not_dropped() {
+        // 1 x 5 timesteps x 5 classes (blank, a, b, c, space): a, space, space, blank, b
+        let chars = chars_from_dict("a\nb\nc\n");
+        let picks = [1usize, 4, 4, 0, 2];
+        let mut data = vec![0.0f32; picks.len() * chars.len()];
+        for (t, k) in picks.iter().enumerate() {
+            data[t * chars.len() + k] = 1.0;
+        }
+        assert_eq!(ctc_decode(&data, &[1, picks.len(), chars.len()], &chars), "a b");
+    }
+
+    #[test]
+    fn a_kernel_box_is_pushed_out_like_upstream_unclip() {
+        // 100 x 10 kernel: area 1000, perimeter 220 -> distance 1000 * 1.5 / 220 = 6.818
+        assert!((unclip_distance(100.0, 10.0) - 6.818_182).abs() < 1e-3);
+        // one kernel blob in a 40 x 20 map, image same size: the box grows by ceil-ish d on every side, clamped to the image
+        let (w, h) = (40usize, 20usize);
+        let mut map = vec![0.0f32; w * h];
+        for y in 8..12 { for x in 10..30 { map[y * w + x] = 0.9; } }
+        let b = &extract_boxes(&map, w, h, w as u32, h as u32)[0];
+        let d = unclip_distance(20.0, 4.0); // 20*4*1.5/48 = 2.5
+        assert_eq!((b.x1, b.y1, b.x2, b.y2), ((10.0 - d) as u32, (8.0 - d) as u32, (30.0 + d) as u32, (12.0 + d) as u32));
+    }
+
+    #[test]
+    fn detection_uses_imagenet_normalization_in_bgr_order() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([255, 0, 128])));
+        let t = image_to_paddle_tensor(&img);
+        // channel 0 = B (128), 1 = G (0), 2 = R (255)
+        let want = [(128.0 / 255.0 - 0.485) / 0.229, (0.0 - 0.456) / 0.224, (1.0 - 0.406) / 0.225];
+        for (got, w) in t.iter().zip(want) {
+            assert!((got - w).abs() < 1e-5, "{got} vs {w}");
+        }
+    }
 }
