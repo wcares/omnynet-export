@@ -277,6 +277,11 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
             }).collect()
         }
     };
+    // A recognizer whose class count is not the table reads garbage: FAIL (3ts on #3), so the caller sees an error and can offload,
+    // instead of a success whose text is wrong.
+    if let Some(m) = MISMATCH.get() {
+        return Err(format!("character table does not match the recognizer: {m}").into());
+    }
 
     // Build output
     let all_text: String = text_boxes.iter()
@@ -299,15 +304,12 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
         text_boxes.iter().map(|b| b.confidence).sum::<f32>() / text_boxes.len() as f32
     };
 
-    let mut output = serde_json::json!({
+    let output = serde_json::json!({
         "type": "ocr",
         "text": all_text,
         "boxes": boxes_json,
         "confidence": avg_conf
     });
-    if let Some(w) = MISMATCH.get() {
-        output["warning"] = serde_json::json!(w);
-    }
 
     let json = serde_json::to_vec(&output)?;
     io::stdout().write_all(&json)?;
@@ -395,7 +397,7 @@ fn run_recognition(img: &DynamicImage, boxes: &[TextBox]) -> Result<Vec<TextBoxR
 
         // CTC decode (a model whose class count is not the table's reads garbage: say so, loudly, once per run)
         if let Some(msg) = class_count_mismatch(&shape_vec, chars.len()) {
-            // stderr is dropped by omny-compute when the processor succeeds, so the output JSON carries it too ("warning")
+            // recorded once; postprocess fails with it after recognition (see there)
             let first = MISMATCH.get().is_none();
             let msg = MISMATCH.get_or_init(|| msg);
             if first {
