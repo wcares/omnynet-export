@@ -27,6 +27,10 @@ const DET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 const DET_LIMIT_SIDE: u32 = 960;
 const DET_THRESH: f32 = 0.3;
 const BOX_THRESH: f32 = 0.5;
+/// DB "unclip": the detector marks a SHRUNKEN text kernel; each box is pushed out by area * ratio / perimeter (upstream
+/// ppocr/postprocess/db_postprocess.py unclip, inference default det_db_unclip_ratio 1.5). Without it the crops cut off the tops
+/// and bottoms of letters and the recognizer misreads them.
+const UNCLIP_RATIO: f32 = 1.5;
 
 /// Recognition parameters
 const REC_HEIGHT: u32 = 48;
@@ -545,11 +549,12 @@ fn extract_boxes(prob_map: &[f32], width: usize, height: usize, orig_w: u32, ori
                 continue;
             }
 
-            // Scale to original image coordinates
-            let x1 = (min_x as f32 * scale_x) as u32;
-            let y1 = (min_y as f32 * scale_y) as u32;
-            let x2 = ((max_x + 1) as f32 * scale_x).min(orig_w as f32) as u32;
-            let y2 = ((max_y + 1) as f32 * scale_y).min(orig_h as f32) as u32;
+            // Unclip (in map pixels), then scale to original image coordinates
+            let d = unclip_distance(box_w as f32, box_h as f32);
+            let x1 = ((min_x as f32 - d).max(0.0) * scale_x) as u32;
+            let y1 = ((min_y as f32 - d).max(0.0) * scale_y) as u32;
+            let x2 = (((max_x + 1) as f32 + d) * scale_x).min(orig_w as f32) as u32;
+            let y2 = (((max_y + 1) as f32 + d) * scale_y).min(orig_h as f32) as u32;
 
             boxes.push(TextBox {
                 x1,
@@ -572,6 +577,11 @@ fn extract_boxes(prob_map: &[f32], width: usize, height: usize, orig_w: u32, ori
     });
 
     boxes
+}
+
+/// How far each edge of a `w` x `h` kernel box moves out: area * UNCLIP_RATIO / perimeter (upstream's polygon offset distance).
+fn unclip_distance(w: f32, h: f32) -> f32 {
+    w * h * UNCLIP_RATIO / (2.0 * (w + h))
 }
 
 /// Convert image to PaddleOCR tensor format (CHW, BGR, normalized)
@@ -654,6 +664,19 @@ mod tests {
             data[t * chars.len() + k] = 1.0;
         }
         assert_eq!(ctc_decode(&data, &[1, picks.len(), chars.len()], &chars), "a b");
+    }
+
+    #[test]
+    fn a_kernel_box_is_pushed_out_like_upstream_unclip() {
+        // 100 x 10 kernel: area 1000, perimeter 220 -> distance 1000 * 1.5 / 220 = 6.818
+        assert!((unclip_distance(100.0, 10.0) - 6.818_182).abs() < 1e-3);
+        // one kernel blob in a 40 x 20 map, image same size: the box grows by ceil-ish d on every side, clamped to the image
+        let (w, h) = (40usize, 20usize);
+        let mut map = vec![0.0f32; w * h];
+        for y in 8..12 { for x in 10..30 { map[y * w + x] = 0.9; } }
+        let b = &extract_boxes(&map, w, h, w as u32, h as u32)[0];
+        let d = unclip_distance(20.0, 4.0); // 20*4*1.5/48 = 2.5
+        assert_eq!((b.x1, b.y1, b.x2, b.y2), ((10.0 - d) as u32, (8.0 - d) as u32, (30.0 + d) as u32, (12.0 + d) as u32));
     }
 
     #[test]
