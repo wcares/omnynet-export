@@ -277,6 +277,11 @@ fn postprocess() -> Result<(), Box<dyn std::error::Error>> {
             }).collect()
         }
     };
+    // A recognizer whose class count is not the table reads garbage: FAIL (3ts on #3), so the caller sees an error and can offload,
+    // instead of a success whose text is wrong.
+    if let Some(m) = MISMATCH.get() {
+        return Err(format!("character table does not match the recognizer: {m}").into());
+    }
 
     // Build output
     let all_text: String = text_boxes.iter()
@@ -390,7 +395,15 @@ fn run_recognition(img: &DynamicImage, boxes: &[TextBox]) -> Result<Vec<TextBoxR
         let (output_shape, output_data) = output_value.try_extract_tensor::<f32>()?;
         let shape_vec: Vec<usize> = output_shape.iter().map(|&x| x as usize).collect();
 
-        // CTC decode
+        // CTC decode (a model whose class count is not the table's reads garbage: say so, loudly, once per run)
+        if let Some(msg) = class_count_mismatch(&shape_vec, chars.len()) {
+            // recorded once; postprocess fails with it after recognition (see there)
+            let first = MISMATCH.get().is_none();
+            let msg = MISMATCH.get_or_init(|| msg);
+            if first {
+                eprintln!("[paddleocr] ERROR: {msg}");
+            }
+        }
         let text = ctc_decode(output_data, &shape_vec, chars);
 
         results.push(TextBoxResult {
@@ -455,6 +468,18 @@ fn preprocess_rec_crop(img: &DynamicImage) -> Vec<f32> {
 }
 
 /// CTC greedy decode
+/// `Some(reason)` when the recognizer's class count (the last output dimension) is not the CTC table's size. The table is blank +
+/// dictionary + space; a mismatch means the dictionary file is not this model's (or the ASCII fallback was used), and every read
+/// is wrong (3ts low note, 2026-10-15).
+static MISMATCH: OnceLock<String> = OnceLock::new();
+
+fn class_count_mismatch(shape: &[usize], table: usize) -> Option<String> {
+    let classes = *shape.last()?;
+    (shape.len() >= 3 && classes != table).then(|| {
+        format!("the recognizer outputs {classes} classes but the character table has {table} (blank + dictionary + space): the dictionary is not this model's, so text will be wrong")
+    })
+}
+
 fn ctc_decode(data: &[f32], shape: &[usize], chars: &[String]) -> String {
     if shape.len() < 3 {
         return String::new();
@@ -652,6 +677,14 @@ mod tests {
     fn the_dictionary_table_has_the_space_class_last() {
         let chars = chars_from_dict("a\nb\r\nc\n");
         assert_eq!(chars, vec!["", "a", "b", "c", " "]);
+    }
+
+    #[test]
+    fn a_class_count_that_is_not_the_table_is_reported() {
+        assert!(class_count_mismatch(&[1, 40, 438], 438).is_none(), "the shipped model + its dictionary");
+        let m = class_count_mismatch(&[1, 40, 438], 96).unwrap(); // the ASCII fallback table
+        assert!(m.contains("438 classes") && m.contains("has 96"), "{m}");
+        assert!(class_count_mismatch(&[438], 1).is_none(), "not a [batch, steps, classes] output: no claim");
     }
 
     #[test]
