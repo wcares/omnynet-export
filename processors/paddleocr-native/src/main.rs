@@ -13,9 +13,15 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// PaddleOCR normalization: (x/255 - 0.5) / 0.5
+/// PaddleOCR RECOGNITION normalization: (x/255 - 0.5) / 0.5
 const NORM_MEAN: f32 = 0.5;
 const NORM_STD: f32 = 0.5;
+
+/// PaddleOCR DB DETECTION normalization: ImageNet mean/std, applied per channel in the BGR order the tensor is built in (upstream
+/// tools/infer/predict_det.py NormalizeImage: mean [0.485, 0.456, 0.406], std [0.229, 0.224, 0.225] on a BGR image). The detector
+/// used to get the recognizer's (x - 0.5) / 0.5, which skews its probability map: big text collapsed to one letter.
+const DET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+const DET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 /// Detection parameters
 const DET_LIMIT_SIDE: u32 = 960;
@@ -55,10 +61,7 @@ fn get_chars() -> &'static Vec<String> {
         for path in &paths {
             if path.exists() {
                 if let Ok(content) = std::fs::read_to_string(path) {
-                    let mut chars: Vec<String> = vec!["".to_string()]; // blank at index 0
-                    for line in content.lines() {
-                        chars.push(line.to_string());
-                    }
+                    let chars = chars_from_dict(&content);
                     eprintln!("[paddleocr] Loaded {} characters from {:?}", chars.len(), path);
                     return chars;
                 }
@@ -73,6 +76,19 @@ fn get_chars() -> &'static Vec<String> {
         }
         chars
     })
+}
+
+/// The CTC table for a PaddleOCR dictionary: blank at index 0, one entry per dictionary line, then " " LAST. PaddleOCR rec models
+/// are trained with use_space_char, so the model has one more class than blank + dictionary (upstream
+/// ppocr/postprocess/rec_postprocess.py appends " "); without it every predicted space fell off the end and was dropped
+/// (shipped rec.onnx: 438 classes = 1 + 436 + 1).
+fn chars_from_dict(content: &str) -> Vec<String> {
+    let mut chars: Vec<String> = vec!["".to_string()]; // blank at index 0
+    for line in content.lines() {
+        chars.push(line.trim_end_matches('\r').to_string());
+    }
+    chars.push(" ".to_string()); // use_space_char
+    chars
 }
 
 /// Path to recognition ONNX model
@@ -565,14 +581,14 @@ fn image_to_paddle_tensor(img: &DynamicImage) -> Vec<f32> {
 
     let mut tensor = Vec::with_capacity((3 * width * height) as usize);
 
-    // BGR order for PaddleOCR
+    // BGR order for PaddleOCR, detection normalization (DET_MEAN / DET_STD index = BGR channel, as upstream)
     for c in 0..3 {
         let channel_idx = 2 - c; // BGR mapping
         for y in 0..height {
             for x in 0..width {
                 let pixel = rgb.get_pixel(x, y);
                 let value = pixel[channel_idx] as f32 / 255.0;
-                let normalized = (value - NORM_MEAN) / NORM_STD;
+                let normalized = (value - DET_MEAN[c]) / DET_STD[c];
                 tensor.push(normalized);
             }
         }
@@ -616,4 +632,38 @@ fn infer_shape(value: &serde_json::Value) -> Vec<usize> {
     }
 
     shape
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_dictionary_table_has_the_space_class_last() {
+        let chars = chars_from_dict("a\nb\r\nc\n");
+        assert_eq!(chars, vec!["", "a", "b", "c", " "]);
+    }
+
+    #[test]
+    fn a_predicted_space_is_decoded_not_dropped() {
+        // 1 x 5 timesteps x 5 classes (blank, a, b, c, space): a, space, space, blank, b
+        let chars = chars_from_dict("a\nb\nc\n");
+        let picks = [1usize, 4, 4, 0, 2];
+        let mut data = vec![0.0f32; picks.len() * chars.len()];
+        for (t, k) in picks.iter().enumerate() {
+            data[t * chars.len() + k] = 1.0;
+        }
+        assert_eq!(ctc_decode(&data, &[1, picks.len(), chars.len()], &chars), "a b");
+    }
+
+    #[test]
+    fn detection_uses_imagenet_normalization_in_bgr_order() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([255, 0, 128])));
+        let t = image_to_paddle_tensor(&img);
+        // channel 0 = B (128), 1 = G (0), 2 = R (255)
+        let want = [(128.0 / 255.0 - 0.485) / 0.229, (0.0 - 0.456) / 0.224, (1.0 - 0.406) / 0.225];
+        for (got, w) in t.iter().zip(want) {
+            assert!((got - w).abs() < 1e-5, "{got} vs {w}");
+        }
+    }
 }
