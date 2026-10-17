@@ -3,7 +3,7 @@
 //! Pre/post-processing around the `doc_layout` `.omny` model: a page image in, labelled boxes out.
 //!
 //! Usage:
-//!   echo '{"image":"base64..."}' | doc-layout-processor preprocess      -> {"pixel_values": [...], "pixel_values_shape": [1,3,640,640]}
+//!   cat page.png                  | doc-layout-processor preprocess      -> (also accepts {"image":"base64..."}) {"pixel_values": [...], "pixel_values_shape": [1,3,640,640]}
 //!   cat tensors.json              | doc-layout-processor postprocess     -> {"type":"detection","boxes":[{"x1","y1","x2","y2","confidence","class"}]}
 //!
 //! Matches the model's own preprocessor config: resize to exactly 640x640 (bilinear), rescale by 1/255, NO mean/std normalisation
@@ -48,13 +48,22 @@ fn main() {
 fn preprocess() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    let json: Value = serde_json::from_slice(&input)?;
-    let b64 = json.get("image").and_then(Value::as_str).ok_or("missing 'image' (base64 PNG/JPEG)")?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
+    let bytes = image_bytes(&input)?;
     let (pixels, shape) = image_to_tensor(&bytes)?;
     let out = json!({ "pixel_values": pixels, "pixel_values_shape": shape });
     io::stdout().write_all(&serde_json::to_vec(&out)?)?;
     Ok(())
+}
+
+/// The page image from stdin: omny-compute's native-processor path writes the RAW image bytes (PNG/JPEG), like clip and ocr; a JSON object
+/// `{"image": "<base64>"}` is accepted too (the dino form) so the command line from the README works.
+fn image_bytes(input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if input.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{') {
+        let json: Value = serde_json::from_slice(input)?;
+        let b64 = json.get("image").and_then(Value::as_str).ok_or("missing 'image' (base64 PNG/JPEG)")?;
+        return Ok(base64::engine::general_purpose::STANDARD.decode(b64)?);
+    }
+    Ok(input.to_vec())
 }
 
 /// Decode, resize to 640x640 (bilinear / triangle filter, which scales its support when shrinking like PIL's), CHW float32 in 0..1.
@@ -203,6 +212,15 @@ mod tests {
         let (r, g, b) = (&t[..640 * 640], &t[640 * 640..2 * 640 * 640], &t[2 * 640 * 640..]);
         assert!(r[10] > 0.99 && b[10] < 0.01 && g[10] < 0.01, "left edge is red (channel 0 first)");
         assert!(b[640 - 10] > 0.99 && r[640 - 10] < 0.01, "right edge is blue");
+    }
+
+    #[test]
+    fn raw_bytes_and_the_json_form_give_the_same_image() {
+        let raw = b"\x89PNG-bytes".to_vec();
+        assert_eq!(image_bytes(&raw).unwrap(), raw, "raw bytes pass through (the omny-compute path)");
+        let json = format!("{{\"image\":\"{}\"}}", base64::engine::general_purpose::STANDARD.encode(&raw));
+        assert_eq!(image_bytes(json.as_bytes()).unwrap(), raw);
+        assert!(image_bytes(b"  {\"nope\":1}").is_err(), "JSON without an image is an error");
     }
 
     #[test]
