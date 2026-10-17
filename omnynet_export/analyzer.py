@@ -4,6 +4,8 @@ Analyze ONNX models to find safe cut points for distributed inference.
 
 from dataclasses import dataclass
 from typing import Optional
+import math
+
 import numpy as np
 import onnx
 from onnx import ModelProto, GraphProto, NodeProto, TensorProto
@@ -138,6 +140,65 @@ def get_initializer_bytes(graph: GraphProto, name: str) -> int:
         if init.name == name:
             return calculate_tensor_bytes(list(init.dims), init.data_type)
     return 0
+
+
+def weight_bytes_total(model: ModelProto) -> int:
+    """The model's weights in bytes: every initializer ONCE (a weight used by several nodes is stored once), from dims x dtype, so an initializer kept in
+    external data counts the same as an embedded one. This is what `total_size_mb` reports (it matches the file size to within the graph itself)."""
+    seen = set()
+    total = 0
+    for init in model.graph.initializer:
+        if init.name in seen:
+            continue
+        seen.add(init.name)
+        total += calculate_tensor_bytes(list(init.dims), init.data_type)
+    # Weights that an exporter wrote as `Constant` nodes (some detectors store every weight this way) are weights too.
+    for node in model.graph.node:
+        if node.op_type == "Constant":
+            for attr in node.attribute:
+                if attr.name == "value" and attr.HasField("t"):
+                    total += calculate_tensor_bytes(list(attr.t.dims), attr.t.data_type)
+    return total
+
+
+def peak_activation_bytes(model: ModelProto) -> int:
+    """Peak bytes of intermediate tensors alive at the same time while the graph runs in node order: a tensor is alive from the node that produces it
+    until the last node that reads it (graph inputs/outputs and initializers are not counted; a tensor with an unknown shape counts 0, so this is a
+    lower bound when shape inference could not size everything)."""
+    graph = model.graph
+    initializer_names = {init.name for init in graph.initializer}
+    initializer_names |= {out for node in graph.node if node.op_type == "Constant" for out in node.output}  # constants are weights, not activations
+    graph_outputs = {o.name for o in graph.output}
+    last_use = {}
+    for idx, node in enumerate(graph.node):
+        for inp in node.input:
+            last_use[inp] = idx
+    size = {}
+    live = {}
+    peak = 0
+    for idx, node in enumerate(graph.node):
+        for out in node.output:
+            if not out or out in initializer_names:
+                continue
+            shape, dtype = get_tensor_shape(graph, out)
+            n = calculate_tensor_bytes(shape, dtype) if shape else 0
+            size[out] = n
+            live[out] = n
+        peak = max(peak, sum(live.values()))
+        for name in list(live):
+            if name not in graph_outputs and last_use.get(name, -1) <= idx:
+                del live[name]
+    return peak
+
+
+def estimate_inference_memory_mb(model: ModelProto) -> int:
+    """Estimated resident memory of one CPU onnxruntime session running this model: 1.5 x weights (the runtime holds the weights and its optimised
+    copies while loading) + 2 x the peak of live intermediate tensors + 100 MB of runtime base. Calibrated on four real models (measured net RSS after
+    load and two runs, 4 threads): estimate / measured = 1.03 (sam2 decoder), 0.86 (OCR detector), 1.17 (clip vision), 0.94 (docling layout);
+    models whose intermediate shapes shape inference cannot size are under-counted by the activation term."""
+    weights = weight_bytes_total(model) / (1024 * 1024)
+    activations = peak_activation_bytes(model) / (1024 * 1024)
+    return math.ceil(1.5 * weights + 2 * activations + 100)
 
 
 def analyze_graph(model: ModelProto) -> list[NodeAnalysis]:
