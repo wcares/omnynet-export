@@ -5,6 +5,7 @@ Main export functionality - convert PyTorch models or enrich ONNX to .omny forma
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Union
+import math
 import tempfile
 import os
 
@@ -20,7 +21,7 @@ from .metadata import (
     ShardConfig,
     ExportInfo,
 )
-from .analyzer import find_cut_points, analyze_graph, calculate_shard_configs
+from .analyzer import find_cut_points, analyze_graph, calculate_shard_configs, weight_bytes_total, estimate_inference_memory_mb
 from .format import (
     embed_metadata, save_omny,
     save_omny_v2, OmnyV2Manifest, ProcessorConfig,
@@ -438,16 +439,16 @@ def _process_onnx_model(
     # Analyze graph
     analyses = analyze_graph(onnx_model)
 
-    # Calculate total memory
-    total_bytes = analyses[-1].cumulative_bytes if analyses else 0
-    total_mb = int(total_bytes / (1024 * 1024))
+    # Model size = the weights, each initializer once (was: the running sum over every node of the weights it reads plus its output activations,
+    # which counted shared weights once per use and every intermediate tensor as if all were alive: 13x the real size on a 43 M-parameter detector).
+    weights_bytes = weight_bytes_total(onnx_model)
+    total_mb = max(1, math.ceil(weights_bytes / (1024 * 1024))) if weights_bytes else 0
 
-    # Inference memory: use manual override if provided, otherwise estimate
+    # Inference memory: manual override if given, otherwise the calibrated estimate (see analyzer.estimate_inference_memory_mb).
     if cfg.inference_memory_mb is not None:
         inference_memory_mb = cfg.inference_memory_mb
     else:
-        # Estimate inference memory (weights + activations + overhead)
-        inference_memory_mb = int(total_mb * 1.5)  # 50% overhead estimate
+        inference_memory_mb = estimate_inference_memory_mb(onnx_model)
 
     # Calculate total parameters
     total_params = 0
@@ -709,11 +710,8 @@ def export_v2(
         output_names = [out.name for out in onnx_model.graph.output]
 
         # Calculate model size
-        total_bytes = sum(
-            len(init.raw_data) if init.raw_data else 0
-            for init in onnx_model.graph.initializer
-        )
-        total_mb = int(total_bytes / (1024 * 1024))
+        total_bytes = weight_bytes_total(onnx_model)  # each initializer once, by dims x dtype (was: raw_data only, so float_data / external weights counted 0)
+        total_mb = max(1, math.ceil(total_bytes / (1024 * 1024))) if total_bytes else 0
 
         # Calculate parameters
         total_params = 0
@@ -724,7 +722,7 @@ def export_v2(
             total_params += num_elements
 
         # Inference memory estimate
-        inference_memory_mb = cfg.inference_memory_mb or int(total_mb * 1.5)
+        inference_memory_mb = cfg.inference_memory_mb or estimate_inference_memory_mb(onnx_model)
 
         # Build preprocess config
         preprocess = None
