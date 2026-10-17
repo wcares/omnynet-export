@@ -9,6 +9,7 @@ members = [
     "paddleocr-native",
     "semantic-native",
     "whisper-native",
+    "doc-layout-native",
 ]
 
 [workspace.dependencies]

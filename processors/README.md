@@ -28,6 +28,7 @@ The .omny v2 format specifies which processor to use in its manifest, but proces
 | `ocr` | PaddleOCR | resize to target height, pad width to multiple of 32, ImageNet normalization | ocr/detection |
 | `sam2` | SAM2 | resize longest side to 1024, pad to square, ImageNet normalization | segmentation |
 | `dino` | Grounding DINO | resize to fit 800x1333, ImageNet normalization | detection |
+| `doc-layout` | docling-layout-heron (RT-DETRv2, Apache-2.0) | resize to 640x640 (bilinear), rescale 1/255, NO mean/std | detection (17 page-layout classes: text, table, picture, section_header, ...) |
 
 ## Building Processors
 
