@@ -29,6 +29,7 @@ The .omny v2 format specifies which processor to use in its manifest, but proces
 | `sam2` | SAM2 | resize longest side to 1024, pad to square, ImageNet normalization | segmentation |
 | `dino` | Grounding DINO | resize to fit 800x1333, ImageNet normalization | detection |
 | `doc-layout` | docling-layout-heron (RT-DETRv2, Apache-2.0) | resize to 640x640 (bilinear), rescale 1/255, NO mean/std | detection (17 page-layout classes: text, table, picture, section_header, ...) |
+| `table-structure` | TableFormerV2 (Apache-2.0, PREVIEW; 3 ONNX graphs: `encoder.onnx`, `decoder.onnx`, `bbox.onnx`) | runs the model itself with `ort` (a greedy token loop): resize to 448x448 (bilinear), rescale 1/255, ImageNet mean/std | table_structure (OTSL tokens, grid with spans, one box per cell) |
 
 ## Building Processors
 
@@ -243,3 +244,9 @@ cargo build --release --target aarch64-apple-darwin
 # Windows (cross-compile)
 cargo build --release --target x86_64-pc-windows-gnu
 ```
+
+## table-structure-processor
+
+`table-structure-processor <model-dir>` reads a table crop (PNG/JPEG, or `{"image": "<base64>"}`) on stdin and prints the table's structure as JSON. `ORT_DYLIB_PATH` names `libonnxruntime` (ort load-dynamic, same as `ocr`). It is a native processor that drives its model itself because the work is a loop (encoder once, decoder per token, box head once), so it does not fit the preprocess / run / postprocess split above. `<model-dir>` (or `OMNYNET_TABLE_MODEL_DIR`) holds the three graphs. The graphs are exported from `docling-project/TableFormerV2` with `table-structure-native/export/*.py` (needs torch, onnxscript and `docling-ibm-models` at EXPORT time only). Output boxes are xyxy, normalised 0..1 to the crop.
+
+Verified 2026-10-19 on three table crops cut from the W-9 by `doc-layout`: the token sequences equal an onnxruntime (Python) greedy run of the same graphs token for token, boxes within 9e-5 (the two resize implementations differ slightly); 1.0 to 1.4 s per crop on 4 threads including the three model loads, 420 to 475 MB RSS.
