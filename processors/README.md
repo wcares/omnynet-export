@@ -241,9 +241,11 @@ cargo build --release
 cargo build --release --target x86_64-apple-darwin
 cargo build --release --target aarch64-apple-darwin
 
-# Windows (cross-compile)
-cargo build --release --target x86_64-pc-windows-gnu
+# Windows x64: native MSVC build of all nine (needs Visual Studio Build Tools + rustup stable)
+processors\build-windows.cmd                       # or: processors\build-windows.cmd ocr-processor clip-processor
 ```
+
+`build-windows.cmd` runs `cargo +stable build --release --target x86_64-pc-windows-msvc -p <name>` for `ocr`, `paddleocr`, `doc-layout`, `table-structure`, `clip`, `clip-text`, `dino`, `sam2` and `whisper` and prints each `.exe`'s sha256 (the same sources give the same bytes). `semantic` is not built: the semantic job runs in-process in omny-compute. The processors that use ONNX Runtime read `ORT_DYLIB_PATH` from the parent's environment (omny-compute passes it on from the agent). Verified 2026-10-20 on Windows 11 (win-agent-2): all nine are PE x64 (`MZ`, machine 0x8664); `ocr-processor` / `paddleocr-processor` ran under `omny-compute.exe` on a Windows test box.
 
 ## table-structure-processor
 
