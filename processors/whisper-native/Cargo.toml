@@ -14,3 +14,6 @@ hound = "3.5"
 rustfft = "6.2"
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["load-dynamic"] }
 dirs = "5.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

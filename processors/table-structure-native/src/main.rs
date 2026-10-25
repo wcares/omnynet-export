@@ -29,7 +29,7 @@ const MAX_TOKENS: usize = 512;
 const THREADS: usize = 4;
 type AnyErr = Box<dyn std::error::Error>;
 
-fn main() {
+fn run_main() {
     let dir = std::env::args().nth(1).or_else(|| std::env::var("OMNYNET_TABLE_MODEL_DIR").ok());
     let Some(dir) = dir else {
         eprintln!("Usage: table-structure-processor <model-dir>   (image on stdin)");
@@ -216,5 +216,20 @@ mod tests {
     #[test]
     fn a_non_image_is_an_error_not_a_panic() {
         assert!(image_to_tensor(b"not an image").is_err());
+    }
+}
+
+/// macOS: ONNX Runtime's global environment crashes in exit() ("libc++abi: terminating due to uncaught exception of type std::system_error: mutex lock failed"),
+/// which turned every finished job into a failed one (MEASURED on an M5, ONNX Runtime 1.22.2). This is a one-shot and its output is written by now, so it leaves
+/// through `_exit` and skips the static destructors.
+fn main() {
+    run_main();
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        // SAFETY: `_exit` only takes a status and never returns; stdout and stderr were flushed above.
+        unsafe { libc::_exit(0) }
     }
 }

@@ -610,6 +610,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "image",
+ "libc",
  "ndarray",
  "ort",
  "serde",
@@ -678,6 +679,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "image",
+ "libc",
  "ort",
  "serde",
  "serde_json",
@@ -1044,6 +1046,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "image",
+ "libc",
  "ort",
  "serde_json",
 ]
@@ -1266,6 +1269,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "hound",
+ "libc",
  "ort",
  "rustfft",
  "serde",
