@@ -19,3 +19,6 @@ dirs = "5"
 opt-level = "s"
 lto = true
 strip = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

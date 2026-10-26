@@ -117,7 +117,7 @@ fn recognizer_path() -> PathBuf {
     paths[0].clone()
 }
 
-fn main() {
+fn run_main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
@@ -721,5 +721,20 @@ mod tests {
         for (got, w) in t.iter().zip(want) {
             assert!((got - w).abs() < 1e-5, "{got} vs {w}");
         }
+    }
+}
+
+/// macOS: ONNX Runtime's global environment crashes in exit() ("libc++abi: terminating due to uncaught exception of type std::system_error: mutex lock failed"),
+/// which turned every finished job into a failed one (MEASURED on an M5, ONNX Runtime 1.22.2). This is a one-shot and its output is written by now, so it leaves
+/// through `_exit` and skips the static destructors.
+fn main() {
+    run_main();
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        // SAFETY: `_exit` only takes a status and never returns; stdout and stderr were flushed above.
+        unsafe { libc::_exit(0) }
     }
 }
